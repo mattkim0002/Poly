@@ -126,6 +126,10 @@ def place_limit_order(token_id: str, price: float, size: float, side: str) -> st
         size: Number of shares
         side: 'BUY' or 'SELL'
     """
+    # Polymarket minimum order size is 5 shares
+    if size < 5:
+        size = 5.0
+
     if config.DRY_RUN:
         log.info("[DRY RUN] Would place %s %s %.2f shares @ $%.2f", side, token_id[:12], size, price)
         return "dry_run_order"
