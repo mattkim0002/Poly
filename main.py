@@ -444,6 +444,12 @@ def _cancel_all_open_orders():
         if db_open:
             print(f"[INFO] Marked {len(db_open)} DB trades as cancelled")
 
+        # Reset peak equity to current balance so drawdown calculation starts fresh
+        bankroll = trader.get_balance()
+        if bankroll > 0:
+            database.reset_peak_equity(bankroll)
+            print(f"[INFO] Peak equity reset to current balance: ${bankroll:.2f}")
+
         return len(db_open)
     except Exception as e:
         print(f"[WARN] Failed to cancel orders: {e}")
