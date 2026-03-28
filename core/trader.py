@@ -9,7 +9,7 @@ from py_clob_client.clob_types import (
 import config
 from utils.logger import log
 
-SIGNATURE_TYPE = 1  # POLY_PROXY: EOA key signs, proxy wallet funds
+SIGNATURE_TYPE = 0  # EOA: Polymarket wallet key signs directly
 
 _client: ClobClient | None = None
 
@@ -25,7 +25,6 @@ def get_client() -> ClobClient:
         key=config.POLYMARKET_PRIVATE_KEY,
         chain_id=config.CHAIN_ID,
         signature_type=SIGNATURE_TYPE,
-        funder=config.POLYMARKET_FUNDER_ADDRESS,
     )
 
     # Derive and set API credentials
