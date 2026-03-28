@@ -1,10 +1,12 @@
 """CLOB client wrapper — order execution, positions, balance."""
 
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import OrderArgs, OrderType
+from py_clob_client.clob_types import AssetType, BalanceAllowanceParams, OrderArgs, OrderType
 
 import config
 from utils.logger import log
+
+SIGNATURE_TYPE = 2  # Gnosis Safe proxy wallet
 
 _client: ClobClient | None = None
 
@@ -19,7 +21,7 @@ def get_client() -> ClobClient:
         host=config.CLOB_HOST,
         key=config.POLYMARKET_PRIVATE_KEY,
         chain_id=config.CHAIN_ID,
-        signature_type=0,
+        signature_type=SIGNATURE_TYPE,
         funder=config.POLYMARKET_FUNDER_ADDRESS,
     )
 
@@ -39,13 +41,12 @@ def get_balance() -> float:
     """Get available USDC balance (converted from wei)."""
     client = get_client()
     try:
-        balance_wei = client.get_balance_allowance()
-        # Balance is typically returned in USDC units (6 decimals)
-        if isinstance(balance_wei, dict):
-            raw = float(balance_wei.get("balance", 0))
-        else:
-            raw = float(balance_wei)
-        # py-clob-client returns balance in atomic units (divide by 1e6)
+        params = BalanceAllowanceParams(
+            asset_type=AssetType.COLLATERAL,
+            signature_type=SIGNATURE_TYPE,
+        )
+        result = client.get_balance_allowance(params)
+        raw = float(result.get("balance", 0))
         return raw / 1e6
     except Exception as e:
         log.error("Failed to get balance: %s", e)
@@ -85,13 +86,17 @@ def get_orderbook(token_id: str) -> dict:
 
 
 def get_positions() -> list[dict]:
-    """Get current open positions."""
-    client = get_client()
+    """Get current open positions via data API."""
     try:
-        positions = client.get_positions()
-        if isinstance(positions, list):
-            return positions
-        return []
+        import httpx
+        addr = config.POLYMARKET_FUNDER_ADDRESS
+        resp = httpx.get(
+            f"https://data-api.polymarket.com/positions",
+            params={"user": addr},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json()
     except Exception as e:
         log.error("Failed to get positions: %s", e)
         return []
