@@ -5,9 +5,14 @@ Kelly Criterion, drawdown protection, long-shot bias,
 correlation filter, rolling win rate, R-multiples.
 """
 
+import sys
 import time
 import traceback
 from datetime import date
+
+# Force unbuffered output so nohup/log files update in real time
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
 
 import config
 from core import database, market_data, trader, analyzer
