@@ -34,6 +34,15 @@ def _is_sports_market(question: str) -> bool:
     return False
 
 
+def _is_preferred_market(question: str) -> bool:
+    """Check if market matches preferred categories (crypto, politics, etc)."""
+    q_lower = question.lower()
+    for keyword in config.PREFERRED_KEYWORDS:
+        if keyword in q_lower:
+            return True
+    return False
+
+
 def _daily_loss_limit(bankroll: float) -> float:
     """Max daily loss allowed based on bankroll."""
     return (bankroll / 10.0) * config.DAILY_LOSS_PER_10
@@ -166,6 +175,13 @@ def run_cycle():
     # Skip markets we already have positions in
     open_token_ids = {t["token_id"] for t in open_trades}
     markets = [m for m in markets if not any(tid in open_token_ids for tid in m.get("token_ids", []))]
+
+    # Prioritize preferred markets (crypto, politics, climate, geopolitics)
+    preferred = [m for m in markets if _is_preferred_market(m.get("question", ""))]
+    other = [m for m in markets if not _is_preferred_market(m.get("question", ""))]
+    markets = preferred + other
+    if preferred:
+        print(f"[INFO] {len(preferred)} preferred markets (crypto/politics/climate)")
 
     print(f"[INFO] {len(markets)} markets to evaluate")
 

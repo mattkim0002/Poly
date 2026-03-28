@@ -27,6 +27,7 @@ MAX_DAYS_TO_RESOLUTION = 30       # Only trade markets resolving within 30 days
 
 # === Sports Filter — skip these categories ===
 SPORTS_KEYWORDS = {
+    # Traditional sports
     "nba", "nfl", "mlb", "nhl", "mls", "ufc", "wwe", "wnba",
     "premier league", "la liga", "champions league", "serie a", "bundesliga",
     "ligue 1", "eredivisie", "copa america", "euro 2026",
@@ -40,12 +41,33 @@ SPORTS_KEYWORDS = {
     "pro football", "draft pick", "1st pick", "first pick",
     "quarterback", "wide receiver", "running back", "tight end",
     "lebron", "curry", "mahomes", "ohtani", "messi", "ronaldo",
+    "spurs", "bucks", "lakers", "celtics", "warriors", "nets",
+    "bulls", "knicks", "heat", "76ers", "suns", "nuggets",
+    "chiefs", "eagles", "cowboys", "49ers", "ravens", "bills",
+    "yankees", "dodgers", "braves", "astros", "mets", "red sox",
+    "spread", "over/under", "o/u", "moneyline",
     # Esports
     "counter-strike", "csgo", "cs2", "dota", "dota2", "dota 2",
     "league of legends", "lol", "valorant", "overwatch",
     "esports", "e-sports", "bo1", "bo3", "bo5",
     "fnatic", "navi", "g2", "faze", "cloud9", "team liquid",
     "major tournament", "esl", "blast", "iem",
+    # Soccer/Football
+    "marseille", "psg", "barcelona", "real madrid", "manchester",
+    "liverpool", "arsenal", "chelsea", "tottenham", "juventus",
+    "bayern", "inter milan", "ac milan", "atletico",
+}
+
+# === Preferred categories — prioritize these ===
+PREFERRED_KEYWORDS = {
+    "bitcoin", "btc", "ethereum", "eth", "solana", "sol", "crypto",
+    "xrp", "dogecoin", "doge", "cardano", "ada", "polygon", "matic",
+    "defi", "nft", "blockchain", "token", "coin", "altcoin",
+    "binance", "coinbase", "sec crypto", "etf",
+    "fed", "interest rate", "inflation", "gdp", "tariff", "trade war",
+    "trump", "biden", "congress", "senate", "election", "geopolitical",
+    "iran", "russia", "china", "ukraine", "nato", "ceasefire",
+    "climate", "hurricane", "earthquake", "wildfire", "temperature",
 }
 
 # === Edge / EV Thresholds ===
