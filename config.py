@@ -18,11 +18,11 @@ CHAIN_ID = 137  # Polygon
 
 # === Trading Cycle ===
 CYCLE_INTERVAL_SEC = 300          # 5 minutes
-MAX_MARKETS_PER_CYCLE = 20        # Claude API cost control
+MAX_MARKETS_PER_CYCLE = 30        # Scan more markets per cycle
 
 # === Market Filters ===
-MIN_VOLUME = 1000                 # $1000 minimum market volume
-MIN_LIQUIDITY = 500               # $500 minimum liquidity
+MIN_VOLUME = 10000                # $10k minimum — popular markets only
+MIN_LIQUIDITY = 2000              # $2k minimum liquidity — tighter spreads
 
 # === Sports Filter — skip these categories ===
 SPORTS_KEYWORDS = {
