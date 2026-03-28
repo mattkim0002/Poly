@@ -429,6 +429,36 @@ def _record_equity(bankroll: float):
     )
 
 
+def _cancel_all_open_orders():
+    """Cancel all existing open orders on startup to free up capital."""
+    print("[INFO] Checking for stale open orders to cancel...")
+    try:
+        open_orders = trader.get_open_orders()
+        if not open_orders:
+            print("[INFO] No open orders found")
+            return 0
+
+        print(f"[INFO] Found {len(open_orders)} open order(s) — cancelling all...")
+        cancelled = 0
+        for order in open_orders:
+            order_id = order.get("id") or order.get("orderID") or order.get("order_id")
+            if order_id:
+                if trader.cancel_order(order_id):
+                    cancelled += 1
+                    print(f"  ✗ Cancelled: {order_id}")
+
+        # Also mark them as cancelled in our database
+        db_open = database.get_open_trades()
+        for trade in db_open:
+            database.update_trade_result(trade["id"], trade["entry_price"], 0.0, 0.0, "cancelled")
+
+        print(f"[INFO] Cancelled {cancelled}/{len(open_orders)} orders")
+        return cancelled
+    except Exception as e:
+        print(f"[WARN] Failed to cancel orders: {e}")
+        return 0
+
+
 def main():
     """Main loop — run trading cycle every 5 minutes."""
     database.init_db()
@@ -437,9 +467,12 @@ def main():
     bankroll = trader.get_balance()
     _print_banner(bankroll)
 
+    # Cancel all stale orders from previous runs
+    _cancel_all_open_orders()
+
     print(f"[INFO] Bot started | Cycle interval: {config.CYCLE_INTERVAL_SEC}s")
-    print(f"[INFO] Markets: Politics, Economics, Crypto, Climate, Finance, World events")
-    print(f"[INFO] Excluded: Sports markets")
+    print(f"[INFO] Markets: Crypto (priority), Politics, Climate, Finance, World events")
+    print(f"[INFO] Excluded: Sports & esports markets")
     print()
 
     while True:

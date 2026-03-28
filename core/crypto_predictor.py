@@ -11,7 +11,7 @@ from utils.logger import log
 BINANCE_SYMBOLS = {
     "bitcoin": "BTCUSDT",
     "btc": "BTCUSDT",
-    "ethereum": "BTCUSDT",
+    "ethereum": "ETHUSDT",
     "eth": "ETHUSDT",
     "solana": "SOLUSDT",
     "sol": "SOLUSDT",
