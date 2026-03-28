@@ -9,7 +9,7 @@ from py_clob_client.clob_types import (
 import config
 from utils.logger import log
 
-SIGNATURE_TYPE = 2  # Gnosis Safe proxy wallet
+SIGNATURE_TYPE = 0  # EOA signing, proxy wallet as funder
 
 _client: ClobClient | None = None
 
