@@ -130,14 +130,18 @@ def run_cycle():
     recent_trades = database.get_recent_trades(config.WIN_RATE_WINDOW)
     open_trades = database.get_open_trades()
 
-    print(f"[INFO] Bankroll: ${bankroll:.2f} | Peak: ${peak_equity:.2f} | Open: {len(open_trades)}")
+    # Calculate total equity = cash + open position value
+    total_exposure = sum(t.get("cost", 0) for t in open_trades)
+    total_equity = bankroll + total_exposure
+
+    print(f"[INFO] Cash: ${bankroll:.2f} | Positions: ${total_exposure:.2f} | Total: ${total_equity:.2f} | Peak: ${peak_equity:.2f} | Open: {len(open_trades)}")
 
     # --- Step 2: Check exit conditions ---
     print("[INFO] Step 2: Checking exit conditions...")
 
-    # Drawdown check
-    dd_mult = drawdown_multiplier(bankroll, peak_equity)
-    dd_pct = drawdown(bankroll, peak_equity)
+    # Drawdown check — use total equity (cash + positions), not just cash
+    dd_mult = drawdown_multiplier(total_equity, peak_equity)
+    dd_pct = drawdown(total_equity, peak_equity)
 
     # Always check existing positions for stop loss / take profit
     _check_existing_positions(open_trades)
@@ -145,7 +149,7 @@ def run_cycle():
     if dd_mult == 0.0:
         print(f"[STOP] DRAWDOWN HALT: {dd_pct:.1%} drawdown exceeds {config.DD_THRESHOLD_STOP:.0%} limit")
         print(f"[INFO] Monitoring positions only — no new orders")
-        _record_equity(bankroll)
+        _record_equity(bankroll, total_exposure)
         _print_portfolio(bankroll, open_trades, recent_trades)
         return
 
@@ -156,14 +160,14 @@ def run_cycle():
     daily_limit = _daily_loss_limit(bankroll)
     if _daily_pnl <= -daily_limit:
         print(f"[STOP] DAILY LOSS LIMIT: ${_daily_pnl:.2f} exceeds -${daily_limit:.2f}")
-        _record_equity(bankroll)
+        _record_equity(bankroll, total_exposure)
         _print_portfolio(bankroll, open_trades, recent_trades)
         return
 
     # --- Step 3: Check position limit ---
     if len(open_trades) >= config.MAX_OPEN_POSITIONS:
         print(f"[INFO] Max positions ({config.MAX_OPEN_POSITIONS}) reached, monitoring only")
-        _record_equity(bankroll)
+        _record_equity(bankroll, total_exposure)
         _print_portfolio(bankroll, open_trades, recent_trades)
         return
 
@@ -172,7 +176,7 @@ def run_cycle():
     markets = market_data.get_active_markets(limit=config.MAX_MARKETS_PER_CYCLE)
     if not markets:
         print("[INFO] No markets pass filters")
-        _record_equity(bankroll)
+        _record_equity(bankroll, total_exposure)
         _print_portfolio(bankroll, open_trades, recent_trades)
         return
 
@@ -206,7 +210,7 @@ def run_cycle():
     # --- Step 6: Top opportunities ---
     if not candidates:
         print("[INFO] No opportunities found with sufficient edge")
-        _record_equity(bankroll)
+        _record_equity(bankroll, total_exposure)
         _print_portfolio(bankroll, open_trades, recent_trades)
         return
 
@@ -237,7 +241,7 @@ def run_cycle():
         print(f"[INFO] {trades_placed} trade(s) placed")
 
     # --- Step 8: Record & summarize ---
-    _record_equity(bankroll)
+    _record_equity(bankroll, total_exposure)
     _print_portfolio(bankroll, open_trades, recent_trades)
 
 
@@ -436,16 +440,17 @@ def _check_existing_positions(open_trades: list[dict]):
             print(f"  ❌ LOSS: '{trade['market_question'][:40]}' | PnL=${pnl:.2f} | R={r_mult:.2f}")
 
 
-def _record_equity(bankroll: float):
+def _record_equity(bankroll: float, positions_value: float = 0.0):
     """Snapshot current equity state."""
+    total_eq = bankroll + positions_value
     peak = database.get_peak_equity()
-    new_peak = max(peak, bankroll) if peak > 0 else bankroll
-    dd = drawdown(bankroll, new_peak)
+    new_peak = max(peak, total_eq) if peak > 0 else total_eq
+    dd = drawdown(total_eq, new_peak)
 
     database.record_equity_snapshot(
         balance=bankroll,
-        positions_value=0.0,
-        total_equity=bankroll,
+        positions_value=positions_value,
+        total_equity=total_eq,
         drawdown=dd,
         peak_equity=new_peak,
     )
