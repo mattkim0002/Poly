@@ -135,9 +135,9 @@ def place_limit_order(token_id: str, price: float, size: float, side: str) -> st
             price=price,
             size=size,
             side=side,
-            order_type=OrderType.GTC,
         )
-        resp = client.create_and_post_order(order_args)
+        signed_order = client.create_order(order_args)
+        resp = client.post_order(signed_order, orderType=OrderType.GTC)
         order_id = resp.get("orderID") or resp.get("id")
         log.info("Order placed: %s %s %.2f @ $%.2f -> %s", side, token_id[:12], size, price, order_id)
         return order_id
