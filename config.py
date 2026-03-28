@@ -28,6 +28,7 @@ MIN_LIQUIDITY = 500               # $500 minimum liquidity
 SPORTS_KEYWORDS = {
     "nba", "nfl", "mlb", "nhl", "mls", "ufc", "wwe", "wnba",
     "premier league", "la liga", "champions league", "serie a", "bundesliga",
+    "ligue 1", "eredivisie", "copa america", "euro 2026",
     "touchdown", "home run", "three-pointer", "goal scorer",
     "points", "rebounds", "assists", "rushing yards", "passing yards",
     "batting average", "era", "strikeouts", "saves",
@@ -38,6 +39,12 @@ SPORTS_KEYWORDS = {
     "pro football", "draft pick", "1st pick", "first pick",
     "quarterback", "wide receiver", "running back", "tight end",
     "lebron", "curry", "mahomes", "ohtani", "messi", "ronaldo",
+    # Esports
+    "counter-strike", "csgo", "cs2", "dota", "dota2", "dota 2",
+    "league of legends", "lol", "valorant", "overwatch",
+    "esports", "e-sports", "bo1", "bo3", "bo5",
+    "fnatic", "navi", "g2", "faze", "cloud9", "team liquid",
+    "major tournament", "esl", "blast", "iem",
 }
 
 # === Edge / EV Thresholds ===
