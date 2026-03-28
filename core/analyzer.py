@@ -1,0 +1,114 @@
+"""Claude AI probability estimation for market outcomes."""
+
+import json
+import re
+
+import anthropic
+
+import config
+from utils.logger import log
+
+_anthropic_client: anthropic.Anthropic | None = None
+
+SYSTEM_PROMPT = """You are a calibrated probability forecaster. Your job is to estimate the true probability of prediction market outcomes.
+
+Rules:
+- Be well-calibrated: events you say are 70% likely should happen ~70% of the time
+- Consider base rates, current evidence, and historical precedent
+- Account for your uncertainty — don't be overconfident
+- Consider the current date when relevant
+- Think about what information the market might already be pricing in
+
+Respond ONLY with valid JSON in this exact format:
+{"probability": 0.XX, "confidence": "high|medium|low", "reasoning": "brief explanation"}
+
+Where probability is your estimate that the FIRST outcome (typically "Yes") is correct, from 0.01 to 0.99."""
+
+
+def get_client() -> anthropic.Anthropic:
+    global _anthropic_client
+    if _anthropic_client is None:
+        _anthropic_client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    return _anthropic_client
+
+
+def estimate_probability(
+    question: str,
+    outcomes: list[str],
+    current_prices: list[float],
+) -> dict | None:
+    """Ask Claude to estimate the true probability of a market outcome.
+
+    Returns:
+        {"probability": float, "confidence": str, "reasoning": str}
+        or None on failure
+    """
+    client = get_client()
+
+    # Build the user prompt
+    price_info = ", ".join(
+        f"{outcome}: {price:.0%}" for outcome, price in zip(outcomes, current_prices)
+    )
+
+    user_prompt = f"""Market question: "{question}"
+Current market prices: {price_info}
+Today's date: {_today()}
+
+What is the TRUE probability that "{outcomes[0]}" is the correct outcome? Consider all available evidence and base rates."""
+
+    try:
+        response = client.messages.create(
+            model=config.CLAUDE_MODEL,
+            max_tokens=config.CLAUDE_MAX_TOKENS,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+
+        text = response.content[0].text.strip()
+        result = _parse_response(text)
+
+        if result:
+            log.info(
+                "Claude estimate for '%s': prob=%.2f conf=%s",
+                question[:60], result["probability"], result["confidence"],
+            )
+        return result
+
+    except anthropic.RateLimitError:
+        log.warning("Claude rate limited, skipping this market")
+        return None
+    except Exception as e:
+        log.error("Claude estimation failed: %s", e)
+        return None
+
+
+def _parse_response(text: str) -> dict | None:
+    """Parse Claude's JSON response, handling markdown code blocks."""
+    # Strip markdown code fences if present
+    text = re.sub(r"```json\s*", "", text)
+    text = re.sub(r"```\s*", "", text)
+    text = text.strip()
+
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        log.warning("Failed to parse Claude response as JSON: %s", text[:200])
+        return None
+
+    prob = data.get("probability")
+    if prob is None or not isinstance(prob, (int, float)):
+        log.warning("Missing or invalid probability in Claude response")
+        return None
+
+    prob = max(0.01, min(0.99, float(prob)))
+
+    return {
+        "probability": prob,
+        "confidence": data.get("confidence", "low"),
+        "reasoning": data.get("reasoning", ""),
+    }
+
+
+def _today() -> str:
+    from datetime import date
+    return date.today().isoformat()
