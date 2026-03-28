@@ -10,19 +10,20 @@ from utils.logger import log
 
 _anthropic_client: anthropic.Anthropic | None = None
 
-SYSTEM_PROMPT = """You are a calibrated probability forecaster. Your job is to estimate the true probability of prediction market outcomes.
+SYSTEM_PROMPT = """You are a calibrated probability forecaster. Estimate the true probability of prediction market outcomes.
 
 Rules:
 - Be well-calibrated: events you say are 70% likely should happen ~70% of the time
 - Consider base rates, current evidence, and historical precedent
-- Account for your uncertainty — don't be overconfident
+- Account for your uncertainty
 - Consider the current date when relevant
-- Think about what information the market might already be pricing in
 
-Respond ONLY with valid JSON in this exact format:
-{"probability": 0.XX, "confidence": "high|medium|low", "reasoning": "brief explanation"}
+IMPORTANT: You must respond with ONLY a JSON object. No explanation before or after. No markdown.
+Example: {"probability": 0.35, "confidence": "medium", "reasoning": "Historical base rate is low"}
 
-Where probability is your estimate that the FIRST outcome (typically "Yes") is correct, from 0.01 to 0.99."""
+probability = your estimate the FIRST outcome (Yes) is correct, from 0.01 to 0.99
+confidence = high, medium, or low
+reasoning = one sentence max"""
 
 
 def get_client() -> anthropic.Anthropic:
