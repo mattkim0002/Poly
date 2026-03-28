@@ -18,12 +18,12 @@ CHAIN_ID = 137  # Polygon
 
 # === Trading Cycle ===
 CYCLE_INTERVAL_SEC = 120          # 2 minutes — scan more frequently
-MAX_MARKETS_PER_CYCLE = 30        # Scan more markets per cycle
+MAX_MARKETS_PER_CYCLE = 50        # Scan lots of markets per cycle
 
 # === Market Filters ===
-MIN_VOLUME = 10000                # $10k minimum — popular markets only
-MIN_LIQUIDITY = 2000              # $2k minimum liquidity — tighter spreads
-MAX_DAYS_TO_RESOLUTION = 30       # Only trade markets resolving within 30 days
+MIN_VOLUME = 1000                 # $1k minimum — more markets to choose from
+MIN_LIQUIDITY = 500               # $500 minimum liquidity
+MAX_DAYS_TO_RESOLUTION = 60       # Markets resolving within 60 days
 
 # === Sports Filter — skip these categories ===
 SPORTS_KEYWORDS = {
@@ -71,8 +71,8 @@ PREFERRED_KEYWORDS = {
 }
 
 # === Edge / EV Thresholds ===
-MIN_EDGE = 0.04                   # 4% minimum edge to consider
-MIN_EV_PER_DOLLAR = 0.02          # $0.02 minimum EV per dollar risked
+MIN_EDGE = 0.03                   # 3% minimum edge to consider
+MIN_EV_PER_DOLLAR = 0.01          # $0.01 minimum EV per dollar risked
 
 # === Position Sizing ===
 KELLY_FRACTION = 0.40             # 40% Kelly — more aggressive
