@@ -24,8 +24,22 @@ MAX_MARKETS_PER_CYCLE = 20        # Claude API cost control
 MIN_VOLUME = 1000                 # $1000 minimum market volume
 MIN_LIQUIDITY = 500               # $500 minimum liquidity
 
+# === Sports Filter — skip these categories ===
+SPORTS_KEYWORDS = {
+    "nba", "nfl", "mlb", "nhl", "mls", "ufc", "wwe", "wnba",
+    "premier league", "la liga", "champions league", "serie a", "bundesliga",
+    "touchdown", "home run", "three-pointer", "goal scorer",
+    "points", "rebounds", "assists", "rushing yards", "passing yards",
+    "batting average", "era", "strikeouts", "saves",
+    "mvp", "rookie of the year", "player of the month",
+    "super bowl", "world series", "stanley cup", "march madness",
+    "olympics", "wimbledon", "us open tennis", "french open tennis",
+    "formula 1", "f1", "nascar", "grand prix",
+    "lebron", "curry", "mahomes", "ohtani", "messi", "ronaldo",
+}
+
 # === Edge / EV Thresholds ===
-MIN_EDGE = 0.05                   # 5% minimum edge to consider
+MIN_EDGE = 0.06                   # 6% minimum edge to consider
 MIN_EV_PER_DOLLAR = 0.03          # $0.03 minimum EV per dollar risked
 
 # === Position Sizing ===
@@ -37,6 +51,13 @@ MIN_ORDER_SIZE_USD = 1.0          # Minimum order to place
 # === Risk Management (Chan Drawdown) ===
 DD_THRESHOLD_HALF = 0.20          # Halve size at 20% drawdown
 DD_THRESHOLD_STOP = 0.30          # Stop trading at 30% drawdown
+
+# === Stop Loss / Take Profit ===
+STOP_LOSS_PCT = 0.20              # Exit if position down 20%
+TAKE_PROFIT_EDGE_MIN = 0.02       # Exit if edge drops below 2%
+
+# === Daily Loss Limit ===
+DAILY_LOSS_PER_10 = 2.0           # Max $2 loss per $10 bankroll
 
 # === Rolling Win Rate (Simons) ===
 WIN_RATE_WINDOW = 20              # Last N trades
