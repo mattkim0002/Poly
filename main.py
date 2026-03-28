@@ -431,29 +431,20 @@ def _record_equity(bankroll: float):
 
 def _cancel_all_open_orders():
     """Cancel all existing open orders on startup to free up capital."""
-    print("[INFO] Checking for stale open orders to cancel...")
+    print("[INFO] Cancelling all open orders to free capital...")
     try:
-        open_orders = trader.get_open_orders()
-        if not open_orders:
-            print("[INFO] No open orders found")
-            return 0
-
-        print(f"[INFO] Found {len(open_orders)} open order(s) — cancelling all...")
-        cancelled = 0
-        for order in open_orders:
-            order_id = order.get("id") or order.get("orderID") or order.get("order_id")
-            if order_id:
-                if trader.cancel_order(order_id):
-                    cancelled += 1
-                    print(f"  ✗ Cancelled: {order_id}")
+        client = trader.get_client()
+        result = client.cancel_all()
+        print(f"[INFO] cancel_all response: {result}")
 
         # Also mark them as cancelled in our database
         db_open = database.get_open_trades()
         for trade in db_open:
             database.update_trade_result(trade["id"], trade["entry_price"], 0.0, 0.0, "cancelled")
+        if db_open:
+            print(f"[INFO] Marked {len(db_open)} DB trades as cancelled")
 
-        print(f"[INFO] Cancelled {cancelled}/{len(open_orders)} orders")
-        return cancelled
+        return len(db_open)
     except Exception as e:
         print(f"[WARN] Failed to cancel orders: {e}")
         return 0
