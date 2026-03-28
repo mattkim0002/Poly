@@ -302,7 +302,7 @@ def _execute_trade(candidate: dict, bankroll: float, peak_equity: float, recent_
     if sizing["position_usd"] <= 0:
         return False
 
-    price = candidate["market_price"] - config.PRICE_IMPROVEMENT
+    price = candidate["market_price"] + config.PRICE_IMPROVEMENT
     price = max(0.01, min(0.99, round(price, 2)))
     shares = sizing["shares"]
     cost = shares * price
