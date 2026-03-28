@@ -17,12 +17,12 @@ GAMMA_HOST = "https://gamma-api.polymarket.com"
 CHAIN_ID = 137  # Polygon
 
 # === Trading Cycle ===
-CYCLE_INTERVAL_SEC = 120          # 2 minutes — scan more frequently
+CYCLE_INTERVAL_SEC = 60           # 1 minute — fast for 5-min crypto markets
 MAX_MARKETS_PER_CYCLE = 50        # Scan lots of markets per cycle
 
 # === Market Filters ===
-MIN_VOLUME = 1000                 # $1k minimum — more markets to choose from
-MIN_LIQUIDITY = 500               # $500 minimum liquidity
+MIN_VOLUME = 100                  # Low minimum to catch 5-min crypto markets
+MIN_LIQUIDITY = 100               # Low minimum for short-term markets
 MAX_DAYS_TO_RESOLUTION = 60       # Markets resolving within 60 days
 
 # === Sports Filter — skip these categories ===
@@ -64,6 +64,7 @@ PREFERRED_KEYWORDS = {
     "xrp", "dogecoin", "doge", "cardano", "ada", "polygon", "matic",
     "defi", "nft", "blockchain", "token", "coin", "altcoin",
     "binance", "coinbase", "sec crypto", "etf",
+    "up or down", "5 minutes", "15 minutes", "1 day",
     "fed", "interest rate", "inflation", "gdp", "tariff", "trade war",
     "trump", "biden", "congress", "senate", "election", "geopolitical",
     "iran", "russia", "china", "ukraine", "nato", "ceasefire",

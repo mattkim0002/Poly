@@ -15,7 +15,7 @@ sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
 import config
-from core import database, market_data, trader, analyzer
+from core import database, market_data, trader, analyzer, crypto_predictor
 from strategies import ev as ev_mod, filters, position_sizing
 from strategies.risk import calculate_r_multiple, expectancy, drawdown_multiplier, drawdown
 from utils.logger import log
@@ -247,13 +247,19 @@ def _evaluate_market(market: dict, bankroll: float, peak_equity: float, recent_t
     if yes_price <= 0.01 or yes_price >= 0.99:
         return None
 
-    # Ask Claude for true probability
-    estimate = analyzer.estimate_probability(question, outcomes, outcome_prices)
-    if not estimate:
-        return None
-
-    if estimate["confidence"] == "low":
-        return None
+    # Use crypto predictor for Up/Down markets, Claude for everything else
+    if crypto_predictor.is_crypto_updown_market(question):
+        estimate = crypto_predictor.estimate_crypto_probability(
+            question, yes_price, outcomes[0] if outcomes else "Yes"
+        )
+        if not estimate:
+            return None
+    else:
+        estimate = analyzer.estimate_probability(question, outcomes, outcome_prices)
+        if not estimate:
+            return None
+        if estimate["confidence"] == "low":
+            return None
 
     claude_prob = estimate["probability"]
 
