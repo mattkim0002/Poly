@@ -78,7 +78,7 @@ MIN_EV_PER_DOLLAR = 0.01          # $0.01 minimum EV per dollar risked
 # === Position Sizing ===
 KELLY_FRACTION = 0.40             # 40% Kelly — more aggressive
 MAX_POSITION_PCT = 0.20           # Max 20% of bankroll per trade
-MAX_OPEN_POSITIONS = 12           # More concurrent positions
+MAX_OPEN_POSITIONS = 5            # Max 5 open orders at a time
 MIN_ORDER_SIZE_USD = 1.0          # Minimum order to place
 
 # === Risk Management (Chan Drawdown) ===

@@ -130,8 +130,13 @@ def run_cycle():
     # Drawdown check
     dd_mult = drawdown_multiplier(bankroll, peak_equity)
     dd_pct = drawdown(bankroll, peak_equity)
+
+    # Always check existing positions for stop loss / take profit
+    _check_existing_positions(open_trades)
+
     if dd_mult == 0.0:
         print(f"[STOP] DRAWDOWN HALT: {dd_pct:.1%} drawdown exceeds {config.DD_THRESHOLD_STOP:.0%} limit")
+        print(f"[INFO] Monitoring positions only — no new orders")
         _record_equity(bankroll)
         _print_portfolio(bankroll, open_trades, recent_trades)
         return
@@ -146,9 +151,6 @@ def run_cycle():
         _record_equity(bankroll)
         _print_portfolio(bankroll, open_trades, recent_trades)
         return
-
-    # Check existing positions for stop loss / resolution
-    _check_existing_positions(open_trades)
 
     # --- Step 3: Check position limit ---
     if len(open_trades) >= config.MAX_OPEN_POSITIONS:
