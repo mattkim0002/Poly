@@ -87,6 +87,7 @@ DD_THRESHOLD_STOP = 0.30          # Stop trading at 30% drawdown
 
 # === Stop Loss / Take Profit ===
 STOP_LOSS_PCT = 0.20              # Exit if position down 20%
+TAKE_PROFIT_PCT = 0.15            # Exit if position up 15%
 TAKE_PROFIT_EDGE_MIN = 0.02       # Exit if edge drops below 2%
 
 # === Daily Loss Limit ===

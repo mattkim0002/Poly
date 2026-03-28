@@ -23,6 +23,7 @@ from utils.logger import log
 _cycle_count = 0
 _daily_pnl = 0.0
 _daily_date = None
+_session_start_bankroll = 0.0
 
 
 def _is_sports_market(question: str) -> bool:
@@ -76,8 +77,15 @@ def _print_portfolio(bankroll: float, open_trades: list[dict], recent_trades: li
 
     total_pnl = sum(t.get("pnl") or 0 for t in recent_trades)
 
+    session_profit = bankroll - _session_start_bankroll
+    session_pct = (session_profit / _session_start_bankroll * 100) if _session_start_bankroll > 0 else 0.0
+
     print()
     print("┌─────────────── PORTFOLIO ───────────────┐")
+    print(f"│  Session start:     ${_session_start_bankroll:<20.2f}│")
+    print(f"│  Current balance:   ${bankroll:<20.2f}│")
+    print(f"│  Session profit:    ${session_profit:<+20.2f}│")
+    print(f"│  Session growth:    {session_pct:<+20.1f}% │")
     print(f"│  Open positions:    {len(open_trades):<21}│")
     print(f"│  Total exposure:    ${total_exposure:<20.2f}│")
     print(f"│  Available capital: ${available:<20.2f}│")
@@ -385,6 +393,20 @@ def _check_existing_positions(open_trades: list[dict]):
         if current_price <= 0:
             continue
 
+        # Take profit: exit if up 15%
+        gain_pct = (current_price - entry_price) / entry_price if entry_price > 0 else 0
+        if gain_pct >= config.TAKE_PROFIT_PCT:
+            pnl = (current_price - entry_price) * trade["size"]
+            r_mult = calculate_r_multiple(entry_price, current_price, entry_price)
+            database.update_trade_result(trade["id"], current_price, pnl, r_mult, "won")
+            _daily_pnl += pnl
+            print(f"  💰 TAKE PROFIT: '{trade['market_question'][:40]}' | PnL=${pnl:.2f}")
+
+            # Place sell order to exit
+            if not config.DRY_RUN:
+                trader.place_limit_order(token_id, current_price, trade["size"], "SELL")
+            continue
+
         # Stop loss: exit if down 20%
         loss_pct = (entry_price - current_price) / entry_price if entry_price > 0 else 0
         if loss_pct >= config.STOP_LOSS_PCT:
@@ -458,10 +480,12 @@ def _cancel_all_open_orders():
 
 def main():
     """Main loop — run trading cycle every 5 minutes."""
+    global _session_start_bankroll
     database.init_db()
 
     # Get initial balance for banner
     bankroll = trader.get_balance()
+    _session_start_bankroll = bankroll
     _print_banner(bankroll)
 
     # Cancel all stale orders from previous runs
