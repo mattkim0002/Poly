@@ -35,6 +35,8 @@ SPORTS_KEYWORDS = {
     "super bowl", "world series", "stanley cup", "march madness",
     "olympics", "wimbledon", "us open tennis", "french open tennis",
     "formula 1", "f1", "nascar", "grand prix",
+    "pro football", "draft pick", "1st pick", "first pick",
+    "quarterback", "wide receiver", "running back", "tight end",
     "lebron", "curry", "mahomes", "ohtani", "messi", "ronaldo",
 }
 

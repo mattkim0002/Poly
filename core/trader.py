@@ -1,7 +1,10 @@
 """CLOB client wrapper — order execution, positions, balance."""
 
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import AssetType, BalanceAllowanceParams, OrderArgs, OrderType
+from py_clob_client.clob_types import (
+    AssetType, BalanceAllowanceParams, OrderArgs, OrderType,
+    PartialCreateOrderOptions,
+)
 
 import config
 from utils.logger import log
@@ -130,13 +133,20 @@ def place_limit_order(token_id: str, price: float, size: float, side: str) -> st
 
     client = get_client()
     try:
+        # Get tick size for this market
+        try:
+            tick_size = client.get_tick_size(token_id)
+        except Exception:
+            tick_size = "0.01"
+
         order_args = OrderArgs(
             token_id=token_id,
             price=price,
             size=size,
             side=side,
         )
-        signed_order = client.create_order(order_args)
+        options = PartialCreateOrderOptions(tick_size=tick_size)
+        signed_order = client.create_order(order_args, options)
         resp = client.post_order(signed_order, orderType=OrderType.GTC)
         order_id = resp.get("orderID") or resp.get("id")
         log.info("Order placed: %s %s %.2f @ $%.2f -> %s", side, token_id[:12], size, price, order_id)
