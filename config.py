@@ -17,12 +17,13 @@ GAMMA_HOST = "https://gamma-api.polymarket.com"
 CHAIN_ID = 137  # Polygon
 
 # === Trading Cycle ===
-CYCLE_INTERVAL_SEC = 300          # 5 minutes
+CYCLE_INTERVAL_SEC = 120          # 2 minutes — scan more frequently
 MAX_MARKETS_PER_CYCLE = 30        # Scan more markets per cycle
 
 # === Market Filters ===
 MIN_VOLUME = 10000                # $10k minimum — popular markets only
 MIN_LIQUIDITY = 2000              # $2k minimum liquidity — tighter spreads
+MAX_DAYS_TO_RESOLUTION = 30       # Only trade markets resolving within 30 days
 
 # === Sports Filter — skip these categories ===
 SPORTS_KEYWORDS = {
