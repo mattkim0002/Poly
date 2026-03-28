@@ -10,22 +10,33 @@ def get_active_markets(limit: int = 100) -> list[dict]:
     """Fetch active, tradeable markets from the Gamma API.
 
     Filters for markets with orderbook enabled, sufficient volume and liquidity.
+    Fetches multiple pages to find enough non-sports markets.
     """
-    params = {
-        "active": "true",
-        "closed": "false",
-        "limit": limit,
-        "order": "volume",
-        "ascending": "false",
-    }
+    all_markets = []
 
-    try:
-        resp = httpx.get(f"{config.GAMMA_HOST}/markets", params=params, timeout=15)
-        resp.raise_for_status()
-        markets = resp.json()
-    except (httpx.HTTPError, Exception) as e:
-        log.error("Failed to fetch markets from Gamma API: %s", e)
-        return []
+    # Fetch multiple batches to get past the sports-dominated top results
+    for offset in range(0, 300, 100):
+        params = {
+            "active": "true",
+            "closed": "false",
+            "limit": 100,
+            "offset": offset,
+            "order": "volume",
+            "ascending": "false",
+        }
+
+        try:
+            resp = httpx.get(f"{config.GAMMA_HOST}/markets", params=params, timeout=15)
+            resp.raise_for_status()
+            batch = resp.json()
+            if not batch:
+                break
+            all_markets.extend(batch)
+        except (httpx.HTTPError, Exception) as e:
+            log.error("Failed to fetch markets from Gamma API: %s", e)
+            break
+
+    markets = all_markets
 
     # Filter for tradeable markets with enough activity
     filtered = []
