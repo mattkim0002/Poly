@@ -71,6 +71,8 @@ def get_midpoint(token_id: str) -> float:
     client = get_client()
     try:
         mid = client.get_midpoint(token_id=token_id)
+        if isinstance(mid, dict):
+            mid = mid.get("mid", 0)
         return float(mid)
     except Exception as e:
         log.error("Failed to get midpoint for %s: %s", token_id, e)
