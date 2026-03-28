@@ -9,7 +9,7 @@ from py_clob_client.clob_types import (
 import config
 from utils.logger import log
 
-SIGNATURE_TYPE = 0  # EOA signing, proxy wallet as funder
+SIGNATURE_TYPE = 1  # POLY_PROXY: EOA key signs, proxy wallet funds
 
 _client: ClobClient | None = None
 
