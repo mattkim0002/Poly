@@ -133,11 +133,15 @@ def place_limit_order(token_id: str, price: float, size: float, side: str) -> st
 
     client = get_client()
     try:
-        # Get tick size for this market
+        # Get tick size and neg_risk for this market
         try:
             tick_size = client.get_tick_size(token_id)
         except Exception:
             tick_size = "0.01"
+        try:
+            neg_risk = client.get_neg_risk(token_id)
+        except Exception:
+            neg_risk = False
 
         order_args = OrderArgs(
             token_id=token_id,
@@ -145,7 +149,7 @@ def place_limit_order(token_id: str, price: float, size: float, side: str) -> st
             size=size,
             side=side,
         )
-        options = PartialCreateOrderOptions(tick_size=tick_size)
+        options = PartialCreateOrderOptions(tick_size=tick_size, neg_risk=neg_risk)
         signed_order = client.create_order(order_args, options)
         resp = client.post_order(signed_order, orderType=OrderType.GTC)
         order_id = resp.get("orderID") or resp.get("id")
