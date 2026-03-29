@@ -92,7 +92,7 @@ TAKE_PROFIT_CRYPTO_PCT = 0.05     # Exit crypto 5-min markets at 5% profit
 TAKE_PROFIT_EDGE_MIN = 0.02       # Exit if edge drops below 2%
 
 # === Crypto Short-Term Market Limits ===
-CRYPTO_MAX_POSITION_PCT = 0.05    # Max 5% of bankroll on a single 5-min crypto bet
+CRYPTO_MAX_POSITION_PCT = 0.20    # Max 20% of bankroll on a single 5-min crypto bet
 CRYPTO_CHECK_INTERVAL_SEC = 15    # Check crypto positions every 15 seconds
 
 # === Daily Loss Limit ===
