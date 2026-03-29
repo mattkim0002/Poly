@@ -3,9 +3,17 @@
 import sqlite3
 import json
 import os
-from flask import Flask, jsonify
+import sys
+
+# Add project root to path so we can import core modules
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from flask import Flask, jsonify, request
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "polybot.db")
+WALLET_ADDRESS = os.environ.get(
+    "POLYMARKET_FUNDER_ADDRESS", "0x5f474d47b106254513a8ddf3e38f434d7b013430"
+)
 
 app = Flask(__name__)
 
@@ -17,55 +25,28 @@ def get_db():
     return conn
 
 
-def fetch_midpoints(token_ids):
-    """Fetch current midpoint prices for a list of token IDs.
+def get_db_rw():
+    """Get a read-write SQLite connection."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-    Uses the CLOB client from core.trader if available, otherwise
-    falls back to the public Polymarket midpoint endpoint.
-    """
-    prices = {}
-    if not token_ids:
-        return prices
 
-    # Try the public CLOB REST API (no auth needed for price data)
+def fetch_live_positions():
+    """Fetch real positions from Polymarket data API."""
     try:
         import httpx
-        for tid in token_ids:
-            try:
-                resp = httpx.get(
-                    f"https://clob.polymarket.com/midpoint",
-                    params={"token_id": tid},
-                    timeout=5,
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                mid = float(data.get("mid", 0))
-                if mid > 0:
-                    prices[tid] = mid
-            except Exception:
-                pass
-    except ImportError:
-        # httpx not available, try requests
-        try:
-            import requests
-            for tid in token_ids:
-                try:
-                    resp = requests.get(
-                        f"https://clob.polymarket.com/midpoint",
-                        params={"token_id": tid},
-                        timeout=5,
-                    )
-                    resp.raise_for_status()
-                    data = resp.json()
-                    mid = float(data.get("mid", 0))
-                    if mid > 0:
-                        prices[tid] = mid
-                except Exception:
-                    pass
-        except ImportError:
-            pass
-
-    return prices
+        resp = httpx.get(
+            "https://data-api.polymarket.com/positions",
+            params={"user": WALLET_ADDRESS},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        positions = resp.json()
+        return [p for p in positions if float(p.get("size", 0)) > 0]
+    except Exception as e:
+        print(f"[dashboard] Failed to fetch positions: {e}")
+        return []
 
 
 @app.route("/api/data")
@@ -82,9 +63,8 @@ def api_data():
         )
         snap = cur.fetchone()
         balance = snap["balance"] if snap else 0
-        total_equity = snap["total_equity"] if snap else 0
         peak_equity = snap["peak_equity"] if snap else 0
-        drawdown = snap["drawdown"] if snap else 0
+        drawdown_val = snap["drawdown"] if snap else 0
 
         # Trade stats
         cur.execute("SELECT COUNT(*) as cnt FROM trades WHERE status != 'cancelled'")
@@ -105,35 +85,35 @@ def api_data():
         )
         total_pnl = cur.fetchone()["total_pnl"]
 
-        # Open positions
-        cur.execute(
-            "SELECT id, market_question, token_id, outcome, side, entry_price, "
-            "size, cost, created_at FROM trades WHERE status = 'open' "
-            "ORDER BY created_at DESC"
-        )
-        open_rows = cur.fetchall()
-        open_positions = [dict(r) for r in open_rows]
+        # Live positions from Polymarket API
+        live_positions = fetch_live_positions()
+        positions_value = sum(float(p.get("currentValue", 0)) for p in live_positions)
+        total_equity = balance + positions_value
 
-        # Fetch live midpoints for open positions
-        token_ids = list({p["token_id"] for p in open_positions if p.get("token_id")})
-        midpoints = fetch_midpoints(token_ids)
+        open_positions = []
+        for p in live_positions:
+            size = float(p.get("size", 0))
+            cur_val = float(p.get("currentValue", 0))
+            # Calculate entry price from initial value
+            initial_val = float(p.get("initialValue", 0))
+            entry_price = initial_val / size if size > 0 else 0
+            cur_price = cur_val / size if size > 0 else 0
+            unrealized_pnl = cur_val - initial_val
 
-        for pos in open_positions:
-            tid = pos.get("token_id", "")
-            mid = midpoints.get(tid)
-            if mid is not None:
-                pos["current_price"] = mid
-                if pos["side"] == "BUY":
-                    pos["unrealized_pnl"] = round(
-                        (mid - pos["entry_price"]) * pos["size"], 4
-                    )
-                else:
-                    pos["unrealized_pnl"] = round(
-                        (pos["entry_price"] - mid) * pos["size"], 4
-                    )
-            else:
-                pos["current_price"] = None
-                pos["unrealized_pnl"] = None
+            open_positions.append({
+                "title": p.get("title", p.get("market", "Unknown")),
+                "outcome": p.get("outcome", "?"),
+                "side": "BUY",
+                "entry_price": round(entry_price, 4),
+                "current_price": round(cur_price, 4),
+                "size": round(size, 2),
+                "cost": round(initial_val, 2),
+                "current_value": round(cur_val, 2),
+                "unrealized_pnl": round(unrealized_pnl, 2),
+                "asset": p.get("asset", ""),
+                "token_id": p.get("asset", ""),
+                "condition_id": p.get("conditionId", ""),
+            })
 
         # Recent closed trades
         cur.execute(
@@ -154,8 +134,9 @@ def api_data():
         return jsonify({
             "balance": balance,
             "total_equity": total_equity,
+            "positions_value": positions_value,
             "peak_equity": peak_equity,
-            "drawdown": drawdown,
+            "drawdown": drawdown_val,
             "total_pnl": total_pnl,
             "win_rate": win_rate,
             "total_trades": total_trades,
@@ -167,6 +148,45 @@ def api_data():
         })
     finally:
         conn.close()
+
+
+@app.route("/api/sell", methods=["POST"])
+def api_sell():
+    """Sell a position by placing a SELL order on the CLOB."""
+    data = request.json
+    token_id = data.get("token_id")
+    size = float(data.get("size", 0))
+    price = float(data.get("price", 0))
+
+    if not token_id or size <= 0 or price <= 0:
+        return jsonify({"error": "Missing token_id, size, or price"}), 400
+
+    try:
+        from core.trader import place_limit_order
+        order_id = place_limit_order(
+            token_id=token_id,
+            price=price,
+            size=size,
+            side="SELL",
+        )
+        if order_id:
+            return jsonify({"success": True, "order_id": order_id})
+        else:
+            return jsonify({"error": "Order failed — check bot log"}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/cancel_all", methods=["POST"])
+def api_cancel_all():
+    """Cancel all open orders."""
+    try:
+        from core.trader import get_client
+        client = get_client()
+        result = client.cancel_all()
+        return jsonify({"success": True, "result": result})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 HTML = """<!DOCTYPE html>
@@ -187,7 +207,7 @@ HTML = """<!DOCTYPE html>
   .cards { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 20px; }
   .card {
     background: #161b22; border: 1px solid #30363d; border-radius: 8px;
-    padding: 16px 20px; flex: 1; min-width: 140px;
+    padding: 16px 20px; flex: 1; min-width: 130px;
   }
   .card .label { font-size: 0.75rem; color: #8b949e; text-transform: uppercase; }
   .card .value { font-size: 1.6rem; font-weight: 700; margin-top: 4px; }
@@ -225,6 +245,19 @@ HTML = """<!DOCTYPE html>
   .status-open { background: #0f1d2d; color: #58a6ff; }
   .status-cancelled { background: #1c1c1c; color: #8b949e; }
   .empty { color: #484f58; font-style: italic; padding: 20px; text-align: center; }
+  .btn-sell {
+    background: #f85149; color: #fff; border: none; border-radius: 6px;
+    padding: 5px 14px; font-size: 0.75rem; font-weight: 600; cursor: pointer;
+    transition: background 0.2s;
+  }
+  .btn-sell:hover { background: #da3633; }
+  .btn-sell:disabled { background: #484f58; cursor: not-allowed; }
+  .btn-cancel-all {
+    background: #30363d; color: #f85149; border: 1px solid #f85149; border-radius: 6px;
+    padding: 6px 16px; font-size: 0.8rem; font-weight: 600; cursor: pointer;
+    margin-left: 12px; transition: background 0.2s;
+  }
+  .btn-cancel-all:hover { background: #2d0f0f; }
   @media (max-width: 600px) {
     .card .value { font-size: 1.2rem; }
     table { font-size: 0.75rem; }
@@ -237,19 +270,22 @@ HTML = """<!DOCTYPE html>
 <div class="refresh-note" id="refresh-note">Auto-refreshes every 30s</div>
 
 <div class="cards" id="cards">
-  <div class="card"><div class="label">Balance</div><div class="value" id="balance">--</div></div>
+  <div class="card"><div class="label">Cash</div><div class="value" id="balance">--</div></div>
+  <div class="card"><div class="label">Positions</div><div class="value" id="posval">--</div></div>
   <div class="card"><div class="label">Total Equity</div><div class="value" id="equity">--</div></div>
   <div class="card"><div class="label">Total P&L</div><div class="value" id="pnl">--</div></div>
   <div class="card"><div class="label">Win Rate</div><div class="value" id="winrate">--</div></div>
   <div class="card"><div class="label">Trades</div><div class="value neutral" id="trades">--</div></div>
-  <div class="card"><div class="label">Drawdown</div><div class="value" id="drawdown">--</div></div>
 </div>
 
-<div class="section-title">Open Positions</div>
+<div class="section-title">
+  Live Positions (from Polymarket)
+  <button class="btn-cancel-all" onclick="cancelAll()" title="Cancel all unfilled orders">Cancel All Orders</button>
+</div>
 <div style="overflow-x:auto">
 <table id="open-table">
   <thead><tr>
-    <th>Market</th><th>Outcome</th><th>Side</th><th>Entry</th><th>Current</th><th>Size</th><th>Unrealized P&L</th>
+    <th>Market</th><th>Outcome</th><th>Entry</th><th>Current</th><th>Size</th><th>Cost</th><th>Value</th><th>P&L</th><th>Action</th>
   </tr></thead>
   <tbody id="open-body"></tbody>
 </table>
@@ -274,16 +310,50 @@ let chart = null;
 function pnlClass(v) { return v > 0 ? 'positive' : v < 0 ? 'negative' : 'neutral'; }
 function fmt(v, d=2) { return v != null ? '$' + Number(v).toFixed(d) : '--'; }
 function pct(v) { return v != null ? Number(v).toFixed(1) + '%' : '--'; }
-function shortQ(q) { return q && q.length > 60 ? q.slice(0, 57) + '...' : (q || '--'); }
+function shortQ(q) { return q && q.length > 50 ? q.slice(0, 47) + '...' : (q || '--'); }
 function shortDate(d) {
   if (!d) return '--';
   try { return new Date(d).toLocaleDateString('en-US', {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}); }
   catch(e) { return d; }
 }
 
+function sellPosition(tokenId, size, price, btn) {
+  if (!confirm('Sell ' + size + ' shares at $' + price.toFixed(2) + '?')) return;
+  btn.disabled = true;
+  btn.textContent = 'Selling...';
+  fetch('/api/sell', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({token_id: tokenId, size: size, price: price})
+  }).then(r => r.json()).then(d => {
+    if (d.success) {
+      btn.textContent = 'Sold!';
+      btn.style.background = '#3fb950';
+      setTimeout(refresh, 3000);
+    } else {
+      alert('Sell failed: ' + (d.error || 'unknown'));
+      btn.disabled = false;
+      btn.textContent = 'SELL';
+    }
+  }).catch(e => {
+    alert('Error: ' + e);
+    btn.disabled = false;
+    btn.textContent = 'SELL';
+  });
+}
+
+function cancelAll() {
+  if (!confirm('Cancel ALL open orders?')) return;
+  fetch('/api/cancel_all', {method: 'POST'}).then(r => r.json()).then(d => {
+    if (d.success) { alert('All orders cancelled'); refresh(); }
+    else alert('Failed: ' + (d.error || 'unknown'));
+  }).catch(e => alert('Error: ' + e));
+}
+
 function refresh() {
   fetch('/api/data').then(r => r.json()).then(d => {
     document.getElementById('balance').textContent = fmt(d.balance);
+    document.getElementById('posval').textContent = fmt(d.positions_value);
     document.getElementById('equity').textContent = fmt(d.total_equity);
 
     let pnlEl = document.getElementById('pnl');
@@ -293,25 +363,24 @@ function refresh() {
     document.getElementById('winrate').textContent = pct(d.win_rate);
     document.getElementById('trades').textContent = d.total_trades + ' (' + d.wins + 'W)';
 
-    let ddEl = document.getElementById('drawdown');
-    ddEl.textContent = d.drawdown != null ? (Number(d.drawdown)*100).toFixed(1) + '%' : '--';
-    ddEl.className = 'value ' + (d.drawdown > 0.1 ? 'negative' : 'neutral');
-
-    // Open positions
+    // Open positions from live API
     let ob = document.getElementById('open-body');
     if (d.open_positions.length === 0) {
-      ob.innerHTML = '<tr><td colspan="7" class="empty">No open positions</td></tr>';
+      ob.innerHTML = '<tr><td colspan="9" class="empty">No open positions</td></tr>';
     } else {
-      ob.innerHTML = d.open_positions.map(p => {
+      ob.innerHTML = d.open_positions.map((p, i) => {
         let upnl = p.unrealized_pnl;
+        let sellPrice = Math.max(0.01, Math.min(0.99, p.current_price - 0.02));
         return '<tr>' +
-          '<td title="' + (p.market_question||'').replace(/"/g,'&quot;') + '">' + shortQ(p.market_question) + '</td>' +
+          '<td title="' + (p.title||'').replace(/"/g,'&quot;') + '">' + shortQ(p.title) + '</td>' +
           '<td>' + (p.outcome||'--') + '</td>' +
-          '<td>' + (p.side||'--') + '</td>' +
           '<td>' + fmt(p.entry_price) + '</td>' +
-          '<td>' + (p.current_price != null ? fmt(p.current_price) : '--') + '</td>' +
-          '<td>' + Number(p.size).toFixed(1) + '</td>' +
-          '<td class="' + pnlClass(upnl) + '">' + (upnl != null ? fmt(upnl) : '--') + '</td>' +
+          '<td>' + fmt(p.current_price) + '</td>' +
+          '<td>' + p.size + '</td>' +
+          '<td>' + fmt(p.cost) + '</td>' +
+          '<td>' + fmt(p.current_value) + '</td>' +
+          '<td class="' + pnlClass(upnl) + '">' + fmt(upnl) + '</td>' +
+          '<td><button class="btn-sell" onclick="sellPosition(\'' + p.token_id + '\',' + p.size + ',' + sellPrice + ',this)">SELL</button></td>' +
           '</tr>';
       }).join('');
     }
@@ -398,4 +467,7 @@ def index():
 
 
 if __name__ == "__main__":
+    # Load .env for trading credentials
+    from dotenv import load_dotenv
+    load_dotenv()
     app.run(host="0.0.0.0", port=8080, debug=False)
