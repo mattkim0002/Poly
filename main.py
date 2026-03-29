@@ -343,6 +343,15 @@ def _execute_trade(candidate: dict, bankroll: float, peak_equity: float, recent_
     shares = sizing["shares"]
     cost = shares * price
 
+    # Cap crypto 5-min market bets at CRYPTO_MAX_POSITION_PCT of bankroll
+    is_crypto = crypto_predictor.is_crypto_updown_market(candidate["question"])
+    if is_crypto:
+        max_cost = bankroll * config.CRYPTO_MAX_POSITION_PCT
+        if cost > max_cost:
+            shares = max(5, max_cost / price)
+            cost = shares * price
+            print(f"  [CAP] Crypto 5-min bet capped: ${cost:.2f} (max {config.CRYPTO_MAX_POSITION_PCT:.0%} of bankroll)")
+
     print(f"\n  ╔═ PLACING ORDER ═══════════════════════════════════╗")
     print(f"  ║  Market:  {candidate['question'][:42]:<43}║")
     print(f"  ║  Side:    {candidate['side']} {candidate['outcome']:<40}║")
@@ -392,23 +401,30 @@ def _check_existing_positions(open_trades: list[dict]):
     for trade in open_trades:
         token_id = trade["token_id"]
         entry_price = trade["entry_price"]
+        question = trade.get("market_question", "")
 
         current_price = trader.get_midpoint(token_id)
         if current_price <= 0:
             continue
 
-        # Take profit: exit if up 15%
+        # Use tighter take-profit for crypto 5-min markets
+        is_crypto = crypto_predictor.is_crypto_updown_market(question)
+        tp_threshold = config.TAKE_PROFIT_CRYPTO_PCT if is_crypto else config.TAKE_PROFIT_PCT
+
+        # Take profit
         gain_pct = (current_price - entry_price) / entry_price if entry_price > 0 else 0
-        if gain_pct >= config.TAKE_PROFIT_PCT:
+        if gain_pct >= tp_threshold:
             pnl = (current_price - entry_price) * trade["size"]
             r_mult = calculate_r_multiple(entry_price, current_price, entry_price)
             database.update_trade_result(trade["id"], current_price, pnl, r_mult, "won")
             _daily_pnl += pnl
-            print(f"  💰 TAKE PROFIT: '{trade['market_question'][:40]}' | PnL=${pnl:.2f}")
+            label = "CRYPTO TP" if is_crypto else "TAKE PROFIT"
+            print(f"  💰 {label}: '{trade['market_question'][:40]}' | +{gain_pct:.0%} | PnL=${pnl:.2f}")
 
             # Place sell order to exit
             if not config.DRY_RUN:
-                trader.place_limit_order(token_id, current_price, trade["size"], "SELL")
+                sell_price = max(0.01, min(0.99, round(current_price - 0.01, 2)))
+                trader.place_limit_order(token_id, sell_price, trade["size"], "SELL")
             continue
 
         # Stop loss: exit if down 20%
@@ -513,9 +529,21 @@ def main():
         except Exception:
             print(f"[ERROR] Cycle failed:\n{traceback.format_exc()}")
 
+        # Between full cycles, do fast checks on crypto positions
         print(f"\n[INFO] Next cycle in {config.CYCLE_INTERVAL_SEC}s...")
+        elapsed = 0
         try:
-            time.sleep(config.CYCLE_INTERVAL_SEC)
+            while elapsed < config.CYCLE_INTERVAL_SEC:
+                sleep_time = min(config.CRYPTO_CHECK_INTERVAL_SEC, config.CYCLE_INTERVAL_SEC - elapsed)
+                time.sleep(sleep_time)
+                elapsed += sleep_time
+
+                # Quick check crypto positions for take-profit/stop-loss
+                if elapsed < config.CYCLE_INTERVAL_SEC:
+                    open_trades = database.get_open_trades()
+                    crypto_trades = [t for t in open_trades if crypto_predictor.is_crypto_updown_market(t.get("market_question", ""))]
+                    if crypto_trades:
+                        _check_existing_positions(crypto_trades)
         except KeyboardInterrupt:
             print("\n[INFO] Shutting down Bot Trader...")
             break

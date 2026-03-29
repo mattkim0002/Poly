@@ -88,7 +88,12 @@ DD_THRESHOLD_STOP = 0.30          # Stop trading at 30% drawdown
 # === Stop Loss / Take Profit ===
 STOP_LOSS_PCT = 0.20              # Exit if position down 20%
 TAKE_PROFIT_PCT = 0.15            # Exit if position up 15%
+TAKE_PROFIT_CRYPTO_PCT = 0.05     # Exit crypto 5-min markets at 5% profit
 TAKE_PROFIT_EDGE_MIN = 0.02       # Exit if edge drops below 2%
+
+# === Crypto Short-Term Market Limits ===
+CRYPTO_MAX_POSITION_PCT = 0.05    # Max 5% of bankroll on a single 5-min crypto bet
+CRYPTO_CHECK_INTERVAL_SEC = 15    # Check crypto positions every 15 seconds
 
 # === Daily Loss Limit ===
 DAILY_LOSS_PER_10 = 2.0           # Max $2 loss per $10 bankroll
