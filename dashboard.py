@@ -11,9 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from flask import Flask, jsonify, request
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "polybot.db")
-WALLET_ADDRESS = os.environ.get(
-    "POLYMARKET_FUNDER_ADDRESS", "0x5f474d47b106254513a8ddf3e38f434d7b013430"
-)
+WALLET_ADDRESS = "0xa1A623585f0D860c3156c8d2b6ADFFc066922c69"  # Polymarket proxy wallet
 
 app = Flask(__name__)
 

@@ -493,8 +493,11 @@ def main():
     _session_start_bankroll = bankroll
     _print_banner(bankroll)
 
-    # Cancel all stale orders from previous runs
-    _cancel_all_open_orders()
+    # Fresh start — reset database if peak is stale
+    peak = database.get_peak_equity()
+    if peak > 0 and abs(peak - bankroll) / max(peak, 1) > 0.5:
+        database.reset_peak_equity(bankroll)
+        print(f"[INFO] Peak equity reset to ${bankroll:.2f}")
 
     print(f"[INFO] Bot started | Cycle interval: {config.CYCLE_INTERVAL_SEC}s")
     print(f"[INFO] Markets: Crypto (priority), Politics, Climate, Finance, World events")

@@ -9,7 +9,8 @@ from py_clob_client.clob_types import (
 import config
 from utils.logger import log
 
-SIGNATURE_TYPE = 0  # EOA: Polymarket wallet key signs directly
+SIGNATURE_TYPE = 2  # POLY_GNOSIS_SAFE: trades through Polymarket proxy wallet
+PROXY_WALLET = "0xa1A623585f0D860c3156c8d2b6ADFFc066922c69"
 
 _client: ClobClient | None = None
 
@@ -25,6 +26,7 @@ def get_client() -> ClobClient:
         key=config.POLYMARKET_PRIVATE_KEY,
         chain_id=config.CHAIN_ID,
         signature_type=SIGNATURE_TYPE,
+        funder=PROXY_WALLET,
     )
 
     # Derive and set API credentials
@@ -93,10 +95,9 @@ def get_positions() -> list[dict]:
     """Get current open positions via data API."""
     try:
         import httpx
-        addr = config.POLYMARKET_FUNDER_ADDRESS
         resp = httpx.get(
             f"https://data-api.polymarket.com/positions",
-            params={"user": addr},
+            params={"user": PROXY_WALLET},
             timeout=15,
         )
         resp.raise_for_status()
