@@ -71,12 +71,12 @@ def _print_banner(bankroll: float):
 def _print_portfolio(bankroll: float, open_trades: list[dict], recent_trades: list[dict]):
     global _daily_pnl
 
-    total_exposure = sum(t.get("cost", 0) for t in open_trades)
-    available = bankroll
-    total_equity = bankroll + total_exposure
+    # Fetch LIVE position values from Polymarket
+    live_positions = trader.get_positions()
+    live_pos_value = sum(float(p.get("currentValue", 0)) for p in (live_positions or []) if float(p.get("size", 0)) > 0)
+    num_positions = sum(1 for p in (live_positions or []) if float(p.get("size", 0)) > 0)
+    total_equity = bankroll + live_pos_value
     daily_limit = _daily_loss_limit(total_equity)
-
-    total_pnl = sum(t.get("pnl") or 0 for t in recent_trades)
 
     session_profit = total_equity - _session_start_bankroll
     session_pct = (session_profit / _session_start_bankroll * 100) if _session_start_bankroll > 0 else 0.0
@@ -85,13 +85,12 @@ def _print_portfolio(bankroll: float, open_trades: list[dict], recent_trades: li
     print("┌─────────────── PORTFOLIO ───────────────┐")
     print(f"│  Session start:     ${_session_start_bankroll:<20.2f}│")
     print(f"│  Cash:              ${bankroll:<20.2f}│")
-    print(f"│  Positions:         ${total_exposure:<20.2f}│")
+    print(f"│  Positions (live):  ${live_pos_value:<20.2f}│")
     print(f"│  Total equity:      ${total_equity:<20.2f}│")
     print(f"│  Session profit:    ${session_profit:<+20.2f}│")
     print(f"│  Session growth:    {session_pct:<+20.1f}% │")
-    print(f"│  Open positions:    {len(open_trades):<21}│")
-    print(f"│  Total exposure:    ${total_exposure:<20.2f}│")
-    print(f"│  Available capital: ${available:<20.2f}│")
+    print(f"│  Open positions:    {num_positions:<21}│")
+    print(f"│  Available to trade:${bankroll:<20.2f}│")
     print(f"│  Daily P&L:        ${_daily_pnl:<+20.2f}│")
     print(f"│  Daily loss limit:  ${daily_limit:<20.2f}│")
 
@@ -133,11 +132,12 @@ def run_cycle():
     recent_trades = database.get_recent_trades(config.WIN_RATE_WINDOW)
     open_trades = database.get_open_trades()
 
-    # Calculate total equity = cash + open position value
-    total_exposure = sum(t.get("cost", 0) for t in open_trades)
-    total_equity = bankroll + total_exposure
+    # Fetch LIVE position values from Polymarket (not stale DB cost basis)
+    live_positions = trader.get_positions()
+    live_pos_value = sum(float(p.get("currentValue", 0)) for p in (live_positions or []) if float(p.get("size", 0)) > 0)
+    total_equity = bankroll + live_pos_value
 
-    print(f"[INFO] Cash: ${bankroll:.2f} | Positions: ${total_exposure:.2f} | Total: ${total_equity:.2f} | Peak: ${peak_equity:.2f} | Open: {len(open_trades)}")
+    print(f"[INFO] Cash: ${bankroll:.2f} | Positions: ${live_pos_value:.2f} | Total: ${total_equity:.2f} | Peak: ${peak_equity:.2f} | Open: {len(live_positions or [])}")
 
     # --- Step 2: Check exit conditions ---
     print("[INFO] Step 2: Checking exit conditions...")
@@ -152,7 +152,7 @@ def run_cycle():
     if dd_mult == 0.0:
         print(f"[STOP] DRAWDOWN HALT: {dd_pct:.1%} drawdown exceeds {config.DD_THRESHOLD_STOP:.0%} limit")
         print(f"[INFO] Monitoring positions only — no new orders")
-        _record_equity(bankroll, total_exposure)
+        _record_equity(bankroll, live_pos_value)
         _print_portfolio(bankroll, open_trades, recent_trades)
         return
 
@@ -160,17 +160,17 @@ def run_cycle():
         print(f"[WARN] Drawdown at {dd_pct:.1%} — position sizes halved")
 
     # Daily loss limit
-    daily_limit = _daily_loss_limit(bankroll)
+    daily_limit = _daily_loss_limit(total_equity)
     if _daily_pnl <= -daily_limit:
         print(f"[STOP] DAILY LOSS LIMIT: ${_daily_pnl:.2f} exceeds -${daily_limit:.2f}")
-        _record_equity(bankroll, total_exposure)
+        _record_equity(bankroll, live_pos_value)
         _print_portfolio(bankroll, open_trades, recent_trades)
         return
 
     # --- Step 3: Check position limit ---
     if len(open_trades) >= config.MAX_OPEN_POSITIONS:
         print(f"[INFO] Max positions ({config.MAX_OPEN_POSITIONS}) reached, monitoring only")
-        _record_equity(bankroll, total_exposure)
+        _record_equity(bankroll, live_pos_value)
         _print_portfolio(bankroll, open_trades, recent_trades)
         return
 
@@ -179,7 +179,7 @@ def run_cycle():
     markets = market_data.get_active_markets(limit=config.MAX_MARKETS_PER_CYCLE)
     if not markets:
         print("[INFO] No markets pass filters")
-        _record_equity(bankroll, total_exposure)
+        _record_equity(bankroll, live_pos_value)
         _print_portfolio(bankroll, open_trades, recent_trades)
         return
 
@@ -213,7 +213,7 @@ def run_cycle():
     # --- Step 6: Top opportunities ---
     if not candidates:
         print("[INFO] No opportunities found with sufficient edge")
-        _record_equity(bankroll, total_exposure)
+        _record_equity(bankroll, live_pos_value)
         _print_portfolio(bankroll, open_trades, recent_trades)
         return
 
@@ -244,7 +244,7 @@ def run_cycle():
         print(f"[INFO] {trades_placed} trade(s) placed")
 
     # --- Step 8: Record & summarize ---
-    _record_equity(bankroll, total_exposure)
+    _record_equity(bankroll, live_pos_value)
     _print_portfolio(bankroll, open_trades, recent_trades)
 
 
