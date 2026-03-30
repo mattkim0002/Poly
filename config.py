@@ -72,13 +72,13 @@ PREFERRED_KEYWORDS = {
 }
 
 # === Edge / EV Thresholds ===
-MIN_EDGE = 0.03                   # 3% minimum edge to consider
-MIN_EV_PER_DOLLAR = 0.01          # $0.01 minimum EV per dollar risked
+MIN_EDGE = 0.05                   # 5% minimum edge — only take confident trades
+MIN_EV_PER_DOLLAR = 0.02          # $0.02 minimum EV per dollar risked
 
 # === Position Sizing ===
-KELLY_FRACTION = 0.40             # 40% Kelly — more aggressive
-MAX_POSITION_PCT = 0.20           # Max 20% of bankroll per trade
-MAX_OPEN_POSITIONS = 5            # Max 5 open orders at a time
+KELLY_FRACTION = 0.25             # 25% Kelly — conservative, steady growth
+MAX_POSITION_PCT = 0.10           # Max 10% of bankroll per trade
+MAX_OPEN_POSITIONS = 8            # More positions = more diversified
 MIN_ORDER_SIZE_USD = 1.0          # Minimum order to place
 
 # === Risk Management (Chan Drawdown) ===
@@ -92,7 +92,7 @@ TAKE_PROFIT_CRYPTO_PCT = 0.05     # Exit crypto 5-min markets at 5% profit
 TAKE_PROFIT_EDGE_MIN = 0.02       # Exit if edge drops below 2%
 
 # === Crypto Short-Term Market Limits ===
-CRYPTO_MAX_POSITION_PCT = 0.20    # Max 20% of bankroll on a single 5-min crypto bet
+CRYPTO_MAX_POSITION_PCT = 0.10    # Max 10% of bankroll on a single 5-min crypto bet
 CRYPTO_CHECK_INTERVAL_SEC = 15    # Check crypto positions every 15 seconds
 
 # === Daily Loss Limit ===

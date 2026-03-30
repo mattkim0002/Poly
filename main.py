@@ -73,17 +73,20 @@ def _print_portfolio(bankroll: float, open_trades: list[dict], recent_trades: li
 
     total_exposure = sum(t.get("cost", 0) for t in open_trades)
     available = bankroll
-    daily_limit = _daily_loss_limit(bankroll + total_exposure)
+    total_equity = bankroll + total_exposure
+    daily_limit = _daily_loss_limit(total_equity)
 
     total_pnl = sum(t.get("pnl") or 0 for t in recent_trades)
 
-    session_profit = bankroll - _session_start_bankroll
+    session_profit = total_equity - _session_start_bankroll
     session_pct = (session_profit / _session_start_bankroll * 100) if _session_start_bankroll > 0 else 0.0
 
     print()
     print("┌─────────────── PORTFOLIO ───────────────┐")
     print(f"│  Session start:     ${_session_start_bankroll:<20.2f}│")
-    print(f"│  Current balance:   ${bankroll:<20.2f}│")
+    print(f"│  Cash:              ${bankroll:<20.2f}│")
+    print(f"│  Positions:         ${total_exposure:<20.2f}│")
+    print(f"│  Total equity:      ${total_equity:<20.2f}│")
     print(f"│  Session profit:    ${session_profit:<+20.2f}│")
     print(f"│  Session growth:    {session_pct:<+20.1f}% │")
     print(f"│  Open positions:    {len(open_trades):<21}│")
@@ -499,21 +502,72 @@ def _cancel_all_open_orders():
         return 0
 
 
+def _sync_polymarket_positions():
+    """Fetch real positions from Polymarket and sync into local DB.
+    Returns total position value."""
+    positions = trader.get_positions()
+    total_value = 0.0
+    synced = 0
+    for p in (positions or []):
+        size = float(p.get("size", 0))
+        if size <= 0:
+            continue
+        token_id = p.get("asset", "")
+        title = p.get("title", p.get("market", "unknown"))
+        avg_price = float(p.get("avgPrice", p.get("price", 0.5)))
+        cur_value = float(p.get("currentValue", 0))
+        total_value += cur_value
+
+        # Check if we already track this position in DB
+        open_trades = database.get_open_trades()
+        already_tracked = any(t["token_id"] == token_id for t in open_trades)
+        if not already_tracked and token_id:
+            # Import existing Polymarket position into our DB
+            database.record_trade(
+                market_id=p.get("conditionId", "imported"),
+                market_question=title,
+                token_id=token_id,
+                side="BUY",
+                outcome=p.get("outcome", "Yes"),
+                entry_price=avg_price,
+                size=size,
+                cost=size * avg_price,
+                order_id="imported",
+                claude_probability=0.0,
+                market_probability=avg_price,
+                edge=0.0,
+                kelly_frac=0.0,
+                dd_mult=1.0,
+                signal_mult=1.0,
+            )
+            synced += 1
+            print(f"  [SYNC] {title[:50]} | {size:.1f} shares @ ${avg_price:.3f} | Value: ${cur_value:.2f}")
+
+    if synced > 0:
+        print(f"[INFO] Synced {synced} existing Polymarket positions into DB")
+    return total_value
+
+
 def main():
     """Main loop — run trading cycle every 5 minutes."""
     global _session_start_bankroll
     database.init_db()
 
-    # Get initial balance for banner
+    # Get initial balance AND positions for true total equity
     bankroll = trader.get_balance()
-    _session_start_bankroll = bankroll
-    _print_banner(bankroll)
+    print(f"[INFO] Cash balance: ${bankroll:.2f}")
+    print("[INFO] Syncing existing Polymarket positions...")
+    positions_value = _sync_polymarket_positions()
+    total_equity = bankroll + positions_value
+    _session_start_bankroll = total_equity
+    print(f"[INFO] Total equity (cash + positions): ${total_equity:.2f}")
+    _print_banner(total_equity)
 
-    # Fresh start — reset database if peak is stale
+    # Set peak equity to current total equity
     peak = database.get_peak_equity()
-    if peak > 0 and abs(peak - bankroll) / max(peak, 1) > 0.5:
-        database.reset_peak_equity(bankroll)
-        print(f"[INFO] Peak equity reset to ${bankroll:.2f}")
+    if peak <= 0 or abs(peak - total_equity) / max(peak, 1) > 0.5:
+        database.reset_peak_equity(total_equity)
+        print(f"[INFO] Peak equity set to ${total_equity:.2f}")
 
     print(f"[INFO] Bot started | Cycle interval: {config.CYCLE_INTERVAL_SEC}s")
     print(f"[INFO] Markets: Crypto (priority), Politics, Climate, Finance, World events")
