@@ -82,8 +82,8 @@ MAX_OPEN_POSITIONS = 5            # Max 5 open orders at a time
 MIN_ORDER_SIZE_USD = 1.0          # Minimum order to place
 
 # === Risk Management (Chan Drawdown) ===
-DD_THRESHOLD_HALF = 0.35          # Halve size at 35% drawdown
-DD_THRESHOLD_STOP = 0.50          # Stop trading at 50% drawdown
+DD_THRESHOLD_HALF = 0.20          # Halve size at 20% drawdown
+DD_THRESHOLD_STOP = 0.30          # Stop trading at 30% drawdown
 
 # === Stop Loss / Take Profit ===
 STOP_LOSS_PCT = 0.20              # Exit if position down 20%
@@ -96,7 +96,7 @@ CRYPTO_MAX_POSITION_PCT = 0.20    # Max 20% of bankroll on a single 5-min crypto
 CRYPTO_CHECK_INTERVAL_SEC = 15    # Check crypto positions every 15 seconds
 
 # === Daily Loss Limit ===
-DAILY_LOSS_PER_10 = 5.0           # Max $5 loss per $10 bankroll — loose for small bankroll
+DAILY_LOSS_PER_10 = 2.0           # Max $2 loss per $10 bankroll
 
 # === Rolling Win Rate (Simons) ===
 WIN_RATE_WINDOW = 20              # Last N trades
