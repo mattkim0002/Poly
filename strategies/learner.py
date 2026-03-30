@@ -166,12 +166,17 @@ def should_skip_market(question: str) -> tuple[bool, str]:
     """Check if we should skip this market based on learning.
 
     Returns (should_skip, reason).
+    Never skips crypto — we always want at least one aggressive play.
     """
     stats = get_performance_stats()
     category = classify_market(question)
     cat_stats = stats["categories"].get(category)
 
     if not cat_stats or cat_stats["total_trades"] < MIN_TRADES_FOR_LEARNING:
+        return False, ""
+
+    # NEVER skip crypto — always allow aggressive crypto plays (just reduce size)
+    if category == "crypto":
         return False, ""
 
     # Skip category if: 0% win rate with 3+ trades

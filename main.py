@@ -313,15 +313,19 @@ def _evaluate_market(market: dict, bankroll: float, peak_equity: float, recent_t
         else:
             print(f"  [LEARN] Edge penalty {edge_adj:.2%} for '{cat}' (losing category)")
 
+    # Use lower edge threshold for crypto — more aggressive
+    is_crypto = crypto_predictor.is_crypto_updown_market(question)
+    min_edge = config.MIN_EDGE_CRYPTO if is_crypto else config.MIN_EDGE
+
     # Pick the better side
-    if yes_edge_adj > no_edge_adj and yes_edge_adj >= config.MIN_EDGE:
+    if yes_edge_adj > no_edge_adj and yes_edge_adj >= min_edge:
         side = "BUY"
         outcome = outcomes[0]
         token_id = token_ids[0]
         market_price = yes_price
         true_prob = claude_prob
         edge_val = yes_edge_adj
-    elif no_edge_adj >= config.MIN_EDGE:
+    elif no_edge_adj >= min_edge:
         side = "BUY"
         outcome = outcomes[1] if len(outcomes) > 1 else "No"
         token_id = token_ids[1] if len(token_ids) > 1 else token_ids[0]
