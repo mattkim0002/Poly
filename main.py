@@ -17,6 +17,10 @@ sys.stderr.reconfigure(line_buffering=True)
 import config
 from core import database, market_data, trader, analyzer, crypto_predictor
 from strategies import ev as ev_mod, filters, position_sizing
+from strategies.learner import (
+    get_edge_adjustment, should_skip_market, get_size_multiplier,
+    print_learning_report, classify_market,
+)
 from strategies.risk import calculate_r_multiple, expectancy, drawdown_multiplier, drawdown
 from utils.logger import log
 
@@ -247,6 +251,10 @@ def run_cycle():
     _record_equity(bankroll, live_pos_value)
     _print_portfolio(bankroll, open_trades, recent_trades)
 
+    # Print learning report every 5 cycles
+    if _cycle_count % 5 == 0:
+        print_learning_report()
+
 
 def _evaluate_market(market: dict, bankroll: float, peak_equity: float, recent_trades: list[dict]) -> dict | None:
     """Evaluate a single market for trading opportunity."""
@@ -262,6 +270,12 @@ def _evaluate_market(market: dict, bankroll: float, peak_equity: float, recent_t
     no_price = outcome_prices[1] if len(outcome_prices) > 1 else (1.0 - yes_price)
 
     if yes_price <= 0.01 or yes_price >= 0.99:
+        return None
+
+    # LEARNING: Skip categories that have been losing money
+    skip, reason = should_skip_market(question)
+    if skip:
+        print(f"  [LEARN] Skipping '{question[:40]}' — {reason}")
         return None
 
     # Use crypto predictor for Up/Down markets, Claude for everything else
@@ -287,6 +301,17 @@ def _evaluate_market(market: dict, bankroll: float, peak_equity: float, recent_t
     # Apply long-shot bias correction
     yes_edge_adj = filters.longshot_bias_correction(yes_price, yes_edge)
     no_edge_adj = filters.longshot_bias_correction(no_price, no_edge)
+
+    # LEARNING: Adjust edge based on historical category performance
+    edge_adj = get_edge_adjustment(question, yes_price)
+    if edge_adj != 0:
+        cat = classify_market(question)
+        yes_edge_adj += edge_adj
+        no_edge_adj += edge_adj
+        if edge_adj > 0:
+            print(f"  [LEARN] Edge boost +{edge_adj:.2%} for '{cat}' (winning category)")
+        else:
+            print(f"  [LEARN] Edge penalty {edge_adj:.2%} for '{cat}' (losing category)")
 
     # Pick the better side
     if yes_edge_adj > no_edge_adj and yes_edge_adj >= config.MIN_EDGE:
@@ -344,6 +369,15 @@ def _execute_trade(candidate: dict, bankroll: float, peak_equity: float, recent_
     price = candidate["market_price"] + config.PRICE_IMPROVEMENT
     price = max(0.01, min(0.99, round(price, 2)))
     shares = sizing["shares"]
+
+    # LEARNING: Adjust size based on category performance
+    size_mult = get_size_multiplier(candidate["question"])
+    if size_mult != 1.0:
+        shares = max(5, shares * size_mult)
+        cat = classify_market(candidate["question"])
+        label = "boosted" if size_mult > 1.0 else "reduced"
+        print(f"  [LEARN] Size {label} to {size_mult:.0%} for '{cat}'")
+
     cost = shares * price
 
     # Cap crypto 5-min market bets at CRYPTO_MAX_POSITION_PCT of bankroll
