@@ -197,22 +197,34 @@ def run_cycle():
     open_token_ids = {t["token_id"] for t in open_trades}
     markets = [m for m in markets if not any(tid in open_token_ids for tid in m.get("token_ids", []))]
 
-    # Prioritize preferred markets (crypto, politics, climate, geopolitics)
-    preferred = [m for m in markets if _is_preferred_market(m.get("question", ""))]
-    other = [m for m in markets if not _is_preferred_market(m.get("question", ""))]
-    markets = preferred + other
-    if preferred:
-        print(f"[INFO] {len(preferred)} preferred markets (crypto/politics/climate)")
+    # CRYPTO FIRST — separate crypto from everything else
+    crypto_markets = [m for m in markets if crypto_predictor.is_crypto_updown_market(m.get("question", ""))]
+    preferred = [m for m in markets if not crypto_predictor.is_crypto_updown_market(m.get("question", "")) and _is_preferred_market(m.get("question", ""))]
+    other = [m for m in markets if m not in crypto_markets and m not in preferred]
 
-    print(f"[INFO] {len(markets)} markets to evaluate")
+    # Crypto first, then preferred, then other
+    markets = crypto_markets + preferred + other
+    print(f"[INFO] {len(crypto_markets)} crypto markets | {len(preferred)} preferred | {len(other)} other")
+    print(f"[INFO] {len(markets)} total markets to evaluate")
 
     # --- Step 5: Estimate probabilities ---
-    print("[INFO] Step 4: Estimating probabilities with Claude...")
-    candidates = []
-    for i, market in enumerate(markets[:config.MAX_MARKETS_PER_CYCLE]):
+    # Evaluate crypto FIRST (no Claude needed — uses Binance data, instant)
+    print("[INFO] Step 4a: Evaluating crypto markets (Binance)...")
+    crypto_candidates = []
+    for market in crypto_markets:
         candidate = _evaluate_market(market, bankroll, peak_equity, recent_trades)
         if candidate:
-            candidates.append(candidate)
+            crypto_candidates.append(candidate)
+            print(f"  🔥 CRYPTO HIT: {candidate['question'][:50]} | Edge: {candidate['edge']:.1%}")
+
+    print(f"[INFO] Step 4b: Evaluating other markets with Claude...")
+    other_candidates = []
+    for market in (preferred + other)[:config.MAX_MARKETS_PER_CYCLE]:
+        candidate = _evaluate_market(market, bankroll, peak_equity, recent_trades)
+        if candidate:
+            other_candidates.append(candidate)
+
+    candidates = crypto_candidates + other_candidates
 
     # --- Step 6: Top opportunities ---
     if not candidates:
@@ -221,23 +233,35 @@ def run_cycle():
         _print_portfolio(bankroll, open_trades, recent_trades)
         return
 
-    # Correlation filter
-    if len(candidates) > 1:
-        before_corr = len(candidates)
-        candidates = filters.filter_correlated(candidates)
-        if before_corr != len(candidates):
-            print(f"[INFO] Filtered {before_corr - len(candidates)} correlated markets")
+    # Correlation filter (don't filter crypto against each other)
+    if len(other_candidates) > 1:
+        before_corr = len(other_candidates)
+        other_candidates = filters.filter_correlated(other_candidates)
+        if before_corr != len(other_candidates):
+            print(f"[INFO] Filtered {before_corr - len(other_candidates)} correlated markets")
+    candidates = crypto_candidates + other_candidates
 
     print(f"\n[INFO] Step 5: Top opportunities found ({len(candidates)}):")
     for c in candidates:
-        print(f"  → {c['question'][:55]}")
+        is_c = crypto_predictor.is_crypto_updown_market(c['question'])
+        tag = "🔥 CRYPTO" if is_c else "  "
+        print(f"  {tag} {c['question'][:50]}")
         print(f"    {c['outcome']} @ {c['market_price']:.2f} | Edge: {c['edge']:.1%} | EV: ${c['ev']:.3f}")
 
-    # --- Step 7: Execute trades ---
-    print("\n[INFO] Step 6: Executing trades...")
+    # --- Step 7: Execute trades — CRYPTO FIRST ---
+    print("\n[INFO] Step 6: Executing trades (crypto priority)...")
     slots_available = config.MAX_OPEN_POSITIONS - len(open_trades)
     trades_placed = 0
-    for candidate in candidates[:slots_available]:
+
+    # Execute crypto trades first
+    for candidate in crypto_candidates[:slots_available]:
+        placed = _execute_trade(candidate, bankroll, peak_equity, recent_trades)
+        if placed:
+            trades_placed += 1
+            slots_available -= 1
+
+    # Then other trades
+    for candidate in other_candidates[:slots_available]:
         placed = _execute_trade(candidate, bankroll, peak_equity, recent_trades)
         if placed:
             trades_placed += 1
