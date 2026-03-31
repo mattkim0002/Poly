@@ -558,8 +558,13 @@ def _check_existing_positions(open_trades: list[dict]):
             label = "CRYPTO TP" if is_crypto else "TAKE PROFIT"
             print(f"  💰 {label}: '{trade['market_question'][:40]}' | +{gain_pct:.0%} | PnL=${pnl:.2f}")
 
-            # Place sell order to exit
+            # Cancel existing orders to free balance, then sell
             if not config.DRY_RUN:
+                try:
+                    client = trader.get_client()
+                    client.cancel_all()
+                except Exception:
+                    pass
                 sell_price = max(0.01, min(0.99, round(current_price - 0.01, 2)))
                 trader.place_limit_order(token_id, sell_price, trade["size"], "SELL")
             continue
@@ -573,8 +578,13 @@ def _check_existing_positions(open_trades: list[dict]):
             _daily_pnl += pnl
             print(f"  🛑 STOP LOSS: '{trade['market_question'][:40]}' | PnL=${pnl:.2f}")
 
-            # Place sell order to exit
+            # Cancel existing orders to free balance, then sell
             if not config.DRY_RUN:
+                try:
+                    client = trader.get_client()
+                    client.cancel_all()
+                except Exception:
+                    pass
                 trader.place_limit_order(token_id, current_price, trade["size"], "SELL")
             continue
 
