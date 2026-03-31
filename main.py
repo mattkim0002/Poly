@@ -48,6 +48,58 @@ def _is_preferred_market(question: str) -> bool:
     return False
 
 
+def _has_data_edge(question: str) -> bool:
+    """Only trade markets where we have a real informational advantage.
+
+    We ONLY trade:
+    - Crypto up/down (we have Binance TA)
+    - Crypto price targets (Claude + news)
+    - Major geopolitical (Iran, Russia, Ukraine, China — Claude + news)
+    - US politics (Trump, elections — Claude + news)
+    - Finance/economics (Fed, oil, tariffs — Claude + news)
+
+    We DO NOT trade:
+    - Obscure local elections nobody knows about
+    - Social media post counts
+    - Random person behavior predictions
+    - Niche markets with no data available
+    """
+    q_lower = question.lower()
+
+    # Crypto — always have Binance data edge
+    crypto_terms = {"bitcoin", "btc", "ethereum", "eth", "solana", "sol",
+                    "xrp", "dogecoin", "doge", "cardano", "crypto",
+                    "up or down", "defi", "token price", "market cap"}
+    if any(t in q_lower for t in crypto_terms):
+        return True
+
+    # Major geopolitical — Claude + live news gives real edge
+    geo_terms = {"iran", "russia", "ukraine", "china", "taiwan", "nato",
+                 "sanctions", "ceasefire", "missile", "nuclear", "war ",
+                 "invasion", "israel", "gaza", "north korea", "military"}
+    if any(t in q_lower for t in geo_terms):
+        return True
+
+    # US politics — high-profile, well-covered
+    politics_terms = {"trump", "biden", "congress", "senate", "supreme court",
+                      "executive order", "impeach", "indictment", "federal",
+                      "republican", "democrat", "white house", "election 2026",
+                      "midterm", "presidential"}
+    if any(t in q_lower for t in politics_terms):
+        return True
+
+    # Finance/economics — real data available
+    finance_terms = {"fed ", "interest rate", "inflation", "gdp", "tariff",
+                     "oil price", "crude oil", "wti", "gold price",
+                     "s&p 500", "nasdaq", "dow jones", "recession",
+                     "unemployment", "cpi", "treasury", "bond yield"}
+    if any(t in q_lower for t in finance_terms):
+        return True
+
+    # Everything else — no edge, skip it
+    return False
+
+
 def _daily_loss_limit(bankroll: float) -> float:
     """Max daily loss allowed based on bankroll."""
     return (bankroll / 10.0) * config.DAILY_LOSS_PER_10
@@ -187,11 +239,18 @@ def run_cycle():
         _print_portfolio(bankroll, open_trades, recent_trades)
         return
 
-    # Filter out sports markets
+    # Filter out junk (sports/entertainment)
     before_filter = len(markets)
     markets = [m for m in markets if not _is_junk_market(m.get("question", ""))]
-    if before_filter != len(markets):
-        print(f"[INFO] Filtered {before_filter - len(markets)} junk markets (sports/entertainment/random)")
+    junk_count = before_filter - len(markets)
+
+    # ONLY trade markets where we have a real data edge
+    before_edge = len(markets)
+    markets = [m for m in markets if _has_data_edge(m.get("question", ""))]
+    no_edge_count = before_edge - len(markets)
+
+    if junk_count or no_edge_count:
+        print(f"[INFO] Filtered {junk_count} junk + {no_edge_count} no-edge markets")
 
     # Skip markets we already have positions in
     open_token_ids = {t["token_id"] for t in open_trades}
