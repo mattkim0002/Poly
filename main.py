@@ -30,8 +30,8 @@ _daily_date = None
 _session_start_bankroll = 0.0
 
 
-def _is_sports_market(question: str) -> bool:
-    """Filter out sports markets."""
+def _is_junk_market(question: str) -> bool:
+    """Filter out sports, entertainment, and random guessing markets."""
     q_lower = question.lower()
     for keyword in config.SPORTS_KEYWORDS:
         if keyword in q_lower:
@@ -188,10 +188,10 @@ def run_cycle():
         return
 
     # Filter out sports markets
-    before_sports = len(markets)
-    markets = [m for m in markets if not _is_sports_market(m.get("question", ""))]
-    if before_sports != len(markets):
-        print(f"[INFO] Filtered {before_sports - len(markets)} sports markets")
+    before_filter = len(markets)
+    markets = [m for m in markets if not _is_junk_market(m.get("question", ""))]
+    if before_filter != len(markets):
+        print(f"[INFO] Filtered {before_filter - len(markets)} junk markets (sports/entertainment/random)")
 
     # Skip markets we already have positions in
     open_token_ids = {t["token_id"] for t in open_trades}

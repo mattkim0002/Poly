@@ -56,6 +56,26 @@ SPORTS_KEYWORDS = {
     "marseille", "psg", "barcelona", "real madrid", "manchester",
     "liverpool", "arsenal", "chelsea", "tottenham", "juventus",
     "bayern", "inter milan", "ac milan", "atletico",
+    # Entertainment / Pop Culture / Music / TV — NO GUESSING
+    "streamed", "streaming", "spotify", "billboard", "album", "song",
+    "box office", "movie", "film", "oscar", "emmy", "grammy", "golden globe",
+    "netflix", "disney", "hbo", "youtube", "tiktok", "views",
+    "subscriber", "followers", "likes", "viral",
+    "celebrity", "kardashian", "taylor swift", "drake", "kanye",
+    "bachelor", "bachelorette", "reality tv", "survivor", "big brother",
+    "american idol", "the voice", "dancing with the stars",
+    "weekend", "weeknd", "top chart", "number one", "hit single",
+    "tv ratings", "viewership", "audience", "premiere",
+    "book sales", "bestseller", "new york times list",
+    "baby name", "gender reveal", "wedding", "divorce",
+    "influencer", "podcast", "twitch", "content creator",
+    # Random guessing markets — no data edge
+    "coin flip", "dice roll", "random", "lottery", "powerball",
+    "mega millions", "roulette", "casino",
+    "weather record", "hottest day", "coldest day",
+    "first tweet", "first post", "most liked",
+    "guinness", "world record", "eating contest",
+    "eurovision",
 }
 
 # === Preferred categories — prioritize these ===
