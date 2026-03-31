@@ -532,15 +532,45 @@ def _execute_trade(candidate: dict, bankroll: float, peak_equity: float, recent_
 
 
 def _check_existing_positions(open_trades: list[dict]):
-    """Check open trades for stop loss, take profit, or resolution."""
+    """Check REAL Polymarket positions for stop loss, take profit, or resolution.
+
+    Only manages positions that actually filled (exist on Polymarket),
+    not unfilled open orders sitting in the DB.
+    """
     global _daily_pnl
+
+    # Get REAL positions from Polymarket — these are shares we actually own
+    live_positions = trader.get_positions()
+    if not live_positions:
+        return
+
+    # Build lookup: token_id -> live position data
+    live_by_token = {}
+    for p in live_positions:
+        if float(p.get("size", 0)) > 0:
+            live_by_token[p.get("asset", "")] = p
 
     for trade in open_trades:
         token_id = trade["token_id"]
         entry_price = trade["entry_price"]
         question = trade.get("market_question", "")
 
-        current_price = trader.get_midpoint(token_id)
+        # ONLY manage positions we actually own on Polymarket
+        live_pos = live_by_token.get(token_id)
+        if not live_pos:
+            # Order never filled — mark as cancelled in DB, don't try to sell
+            if trade.get("order_id") != "imported":
+                database.update_trade_result(trade["id"], entry_price, 0.0, 0.0, "cancelled")
+                print(f"  [CANCEL] Order never filled: '{question[:40]}'")
+            continue
+
+        # Use real position size from Polymarket, not what we ordered
+        real_size = float(live_pos.get("size", 0))
+        avg_price = float(live_pos.get("avgPrice", entry_price))
+        current_price = float(live_pos.get("curPrice", 0))
+
+        if current_price <= 0:
+            current_price = trader.get_midpoint(token_id)
         if current_price <= 0:
             continue
 
@@ -549,16 +579,16 @@ def _check_existing_positions(open_trades: list[dict]):
         tp_threshold = config.TAKE_PROFIT_CRYPTO_PCT if is_crypto else config.TAKE_PROFIT_PCT
 
         # Take profit
-        gain_pct = (current_price - entry_price) / entry_price if entry_price > 0 else 0
+        gain_pct = (current_price - avg_price) / avg_price if avg_price > 0 else 0
         if gain_pct >= tp_threshold:
-            pnl = (current_price - entry_price) * trade["size"]
-            r_mult = calculate_r_multiple(entry_price, current_price, entry_price)
+            pnl = (current_price - avg_price) * real_size
+            r_mult = calculate_r_multiple(avg_price, current_price, avg_price)
             database.update_trade_result(trade["id"], current_price, pnl, r_mult, "won")
             _daily_pnl += pnl
             label = "CRYPTO TP" if is_crypto else "TAKE PROFIT"
-            print(f"  💰 {label}: '{trade['market_question'][:40]}' | +{gain_pct:.0%} | PnL=${pnl:.2f}")
+            print(f"  💰 {label}: '{question[:40]}' | +{gain_pct:.0%} | PnL=${pnl:.2f}")
 
-            # Cancel existing orders to free balance, then sell
+            # Cancel pending orders to free balance, then sell
             if not config.DRY_RUN:
                 try:
                     client = trader.get_client()
@@ -566,26 +596,26 @@ def _check_existing_positions(open_trades: list[dict]):
                 except Exception:
                     pass
                 sell_price = max(0.01, min(0.99, round(current_price - 0.01, 2)))
-                trader.place_limit_order(token_id, sell_price, trade["size"], "SELL")
+                trader.place_limit_order(token_id, sell_price, real_size, "SELL")
             continue
 
         # Stop loss: exit if down 20%
-        loss_pct = (entry_price - current_price) / entry_price if entry_price > 0 else 0
+        loss_pct = (avg_price - current_price) / avg_price if avg_price > 0 else 0
         if loss_pct >= config.STOP_LOSS_PCT:
-            pnl = (current_price - entry_price) * trade["size"]
-            r_mult = calculate_r_multiple(entry_price, current_price, entry_price)
+            pnl = (current_price - avg_price) * real_size
+            r_mult = calculate_r_multiple(avg_price, current_price, avg_price)
             database.update_trade_result(trade["id"], current_price, pnl, r_mult, "lost")
             _daily_pnl += pnl
-            print(f"  🛑 STOP LOSS: '{trade['market_question'][:40]}' | PnL=${pnl:.2f}")
+            print(f"  🛑 STOP LOSS: '{question[:40]}' | PnL=${pnl:.2f}")
 
-            # Cancel existing orders to free balance, then sell
+            # Cancel pending orders to free balance, then sell
             if not config.DRY_RUN:
                 try:
                     client = trader.get_client()
                     client.cancel_all()
                 except Exception:
                     pass
-                trader.place_limit_order(token_id, current_price, trade["size"], "SELL")
+                trader.place_limit_order(token_id, current_price, real_size, "SELL")
             continue
 
         # Check if market resolved (price near 0 or 1)
