@@ -80,11 +80,11 @@ def _has_data_edge(question: str) -> bool:
     if any(t in q_lower for t in geo_terms):
         return True
 
-    # US politics — high-profile, well-covered
+    # US politics — ONLY high-profile, well-covered US politics
     politics_terms = {"trump", "biden", "congress", "senate", "supreme court",
-                      "executive order", "impeach", "indictment", "federal",
-                      "republican", "democrat", "white house", "election 2026",
-                      "midterm", "presidential"}
+                      "executive order", "impeach", "indictment",
+                      "white house", "midterm",
+                      "desantis", "rfk", "vance"}
     if any(t in q_lower for t in politics_terms):
         return True
 

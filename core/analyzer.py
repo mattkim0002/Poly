@@ -68,12 +68,26 @@ Today's date: {_today()}
 What is the TRUE probability that "{outcomes[0]}" is the correct outcome? Use the news headlines above (if any) plus your knowledge to make a well-calibrated estimate."""
 
     try:
-        response = client.messages.create(
-            model=config.CLAUDE_MODEL,
-            max_tokens=config.CLAUDE_MAX_TOKENS,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_prompt}],
-        )
+        # Retry up to 3 times on overloaded errors
+        response = None
+        for attempt in range(3):
+            try:
+                response = client.messages.create(
+                    model=config.CLAUDE_MODEL,
+                    max_tokens=config.CLAUDE_MAX_TOKENS,
+                    system=SYSTEM_PROMPT,
+                    messages=[{"role": "user", "content": user_prompt}],
+                )
+                break
+            except anthropic.APIStatusError as e:
+                if e.status_code == 529 and attempt < 2:
+                    import time
+                    time.sleep(2 * (attempt + 1))
+                    continue
+                raise
+
+        if not response:
+            return None
 
         text = response.content[0].text.strip()
         result = _parse_response(text)
