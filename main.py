@@ -316,6 +316,19 @@ def _evaluate_market(market: dict, bankroll: float, peak_equity: float, recent_t
         if estimate["confidence"] == "low":
             return None
 
+        # Skip if Claude says "no edge" or reasoning is weak
+        reasoning = estimate.get("reasoning", "").lower()
+        if "no edge" in reasoning or "uncertain" in reasoning or "coin flip" in reasoning:
+            print(f"  [SKIP] No edge: '{question[:40]}' — {reasoning[:60]}")
+            return None
+
+        # For medium confidence, require bigger edge (8% instead of 5%)
+        if estimate["confidence"] == "medium":
+            yes_edge_check = abs(estimate["probability"] - yes_price)
+            if yes_edge_check < 0.08:
+                print(f"  [SKIP] Medium conf, weak edge ({yes_edge_check:.0%}): '{question[:40]}'")
+                return None
+
     claude_prob = estimate["probability"]
 
     # Determine which side to trade

@@ -144,7 +144,17 @@ def estimate_crypto_probability(question: str, market_price: float, outcome: str
     else:
         prob = 1.0 - up_prob
 
+    # Only bet if momentum is clear — skip sideways/weak signals
+    if abs(mom_3m) < 0.03 and data["trend_strength"] < 0.4:
+        log.info("Crypto SKIP '%s' — sideways, no clear momentum", question[:40])
+        return None
+
     confidence = "high" if data["trend_strength"] > 0.5 else "medium" if data["trend_strength"] > 0.3 else "low"
+
+    # Reject low confidence crypto — no point guessing on a coin flip
+    if confidence == "low":
+        log.info("Crypto SKIP '%s' — low confidence, weak trend", question[:40])
+        return None
 
     reasoning = (
         f"{symbol}: ${data['price']:.2f} | "
