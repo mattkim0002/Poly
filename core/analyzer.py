@@ -6,6 +6,7 @@ import re
 import anthropic
 
 import config
+from core.news import get_news_context
 from utils.logger import log
 
 _anthropic_client: anthropic.Anthropic | None = None
@@ -15,6 +16,7 @@ SYSTEM_PROMPT = """You are a calibrated probability forecaster. Estimate the tru
 Rules:
 - Be well-calibrated: events you say are 70% likely should happen ~70% of the time
 - Consider base rates, current evidence, and historical precedent
+- PAY CLOSE ATTENTION to the recent news headlines provided — they reflect the current situation
 - Account for your uncertainty
 - Consider the current date when relevant
 
@@ -51,11 +53,17 @@ def estimate_probability(
         f"{outcome}: {price:.0%}" for outcome, price in zip(outcomes, current_prices)
     )
 
+    # Fetch live news for context
+    news_context = get_news_context(question)
+    if news_context:
+        log.info("Got live news for '%s'", question[:40])
+
     user_prompt = f"""Market question: "{question}"
 Current market prices: {price_info}
 Today's date: {_today()}
+{news_context}
 
-What is the TRUE probability that "{outcomes[0]}" is the correct outcome? Consider all available evidence and base rates."""
+What is the TRUE probability that "{outcomes[0]}" is the correct outcome? Use the news headlines above (if any) plus your knowledge to make a well-calibrated estimate."""
 
     try:
         response = client.messages.create(
