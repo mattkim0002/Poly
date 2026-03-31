@@ -155,9 +155,9 @@ def get_peak_equity() -> float:
 
 
 def reset_peak_equity(new_peak: float):
-    """Reset peak equity to current balance (e.g. after cancelling stale orders)."""
+    """Reset peak equity — caps ALL historical peaks to new value."""
     conn = get_connection()
-    conn.execute("UPDATE equity_snapshots SET peak_equity = ? WHERE peak_equity > ?", (new_peak, new_peak))
+    conn.execute("UPDATE equity_snapshots SET peak_equity = MIN(peak_equity, ?)", (new_peak,))
     conn.commit()
     conn.close()
 

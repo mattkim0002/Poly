@@ -12,16 +12,23 @@ def calculate_position(
     true_prob: float,
     peak_equity: float,
     recent_trades: list[dict],
+    current_equity: float | None = None,
 ) -> dict:
     """Calculate final position size through the full quant pipeline.
 
     Final_size = Raw_Kelly * DD_mult * Signal_mult * Config_mult
     Capped at: min(Final_size, bankroll * MAX_POSITION_PCT)
 
+    Args:
+        bankroll: Available cash for trading
+        current_equity: Total equity (cash + positions) for drawdown calc.
+                       Falls back to bankroll if not provided.
+
     Returns dict with size and all intermediate values for logging/storage.
     """
     raw_kelly = kelly_fraction(market_price, true_prob)
-    dd_mult = drawdown_multiplier(bankroll, peak_equity)
+    equity_for_dd = current_equity if current_equity is not None else bankroll
+    dd_mult = drawdown_multiplier(equity_for_dd, peak_equity)
     sig_mult = signal_health_multiplier(recent_trades)
     config_mult = config.KELLY_FRACTION
 

@@ -28,6 +28,7 @@ _cycle_count = 0
 _daily_pnl = 0.0
 _daily_date = None
 _session_start_bankroll = 0.0
+_dead_tokens = set()  # Token IDs with no orderbook — stop retrying
 
 
 def _is_junk_market(question: str) -> bool:
@@ -326,14 +327,14 @@ def run_cycle():
 
     # Execute crypto trades first
     for candidate in crypto_candidates[:slots_available]:
-        placed = _execute_trade(candidate, bankroll, peak_equity, recent_trades)
+        placed = _execute_trade(candidate, bankroll, peak_equity, recent_trades, total_equity)
         if placed:
             trades_placed += 1
             slots_available -= 1
 
     # Then other trades
     for candidate in other_candidates[:slots_available]:
-        placed = _execute_trade(candidate, bankroll, peak_equity, recent_trades)
+        placed = _execute_trade(candidate, bankroll, peak_equity, recent_trades, total_equity)
         if placed:
             trades_placed += 1
 
@@ -465,7 +466,7 @@ def _evaluate_market(market: dict, bankroll: float, peak_equity: float, recent_t
     }
 
 
-def _execute_trade(candidate: dict, bankroll: float, peak_equity: float, recent_trades: list[dict]) -> bool:
+def _execute_trade(candidate: dict, bankroll: float, peak_equity: float, recent_trades: list[dict], total_equity: float = 0.0) -> bool:
     """Size and execute a trade. Returns True if trade was placed."""
     sizing = position_sizing.calculate_position(
         bankroll=bankroll,
@@ -473,6 +474,7 @@ def _execute_trade(candidate: dict, bankroll: float, peak_equity: float, recent_
         true_prob=candidate["true_prob"],
         peak_equity=peak_equity,
         recent_trades=recent_trades,
+        current_equity=total_equity if total_equity > 0 else bankroll,
     )
 
     if sizing["position_usd"] <= 0:
@@ -567,6 +569,10 @@ def _check_existing_positions(open_trades: list[dict]):
         entry_price = trade["entry_price"]
         question = trade.get("market_question", "")
 
+        # Skip tokens we already know are dead/resolved
+        if token_id in _dead_tokens:
+            continue
+
         # ONLY manage positions we actually own on Polymarket
         live_pos = live_by_token.get(token_id)
         if not live_pos:
@@ -584,6 +590,9 @@ def _check_existing_positions(open_trades: list[dict]):
         if current_price <= 0:
             current_price = trader.get_midpoint(token_id)
         if current_price <= 0:
+            # No price available — mark as dead to stop retrying
+            _dead_tokens.add(token_id)
+            print(f"  [DEAD] No price for token {token_id[:20]}... — skipping future checks")
             continue
 
         # Use tighter take-profit for crypto 5-min markets
@@ -749,11 +758,10 @@ def main():
     print(f"[INFO] Total equity (cash + positions): ${total_equity:.2f}")
     _print_banner(total_equity)
 
-    # Set peak equity to current total equity
-    peak = database.get_peak_equity()
-    if peak <= 0 or abs(peak - total_equity) / max(peak, 1) > 0.5:
-        database.reset_peak_equity(total_equity)
-        print(f"[INFO] Peak equity set to ${total_equity:.2f}")
+    # Always reset peak equity to current total equity on startup
+    # This prevents stale high peaks from blocking all trades via DD=0.0
+    database.reset_peak_equity(total_equity)
+    print(f"[INFO] Peak equity reset to ${total_equity:.2f}")
 
     print(f"[INFO] Bot started | Cycle interval: {config.CYCLE_INTERVAL_SEC}s")
     print(f"[INFO] Markets: Crypto (priority), Politics, Climate, Finance, World events")
