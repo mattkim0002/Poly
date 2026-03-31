@@ -276,9 +276,21 @@ def run_cycle():
             crypto_candidates.append(candidate)
             print(f"  🔥 CRYPTO HIT: {candidate['question'][:50]} | Edge: {candidate['edge']:.1%}")
 
-    print(f"[INFO] Step 4b: Evaluating other markets with Claude...")
+    # Pre-filter non-crypto: skip markets where price is too close to 0 or 1 (no edge)
+    claude_markets = []
+    for market in (preferred + other):
+        prices = market.get("outcome_prices", [])
+        if prices:
+            yes_price = prices[0]
+            # Only evaluate markets priced 0.10-0.90 — extremes have no edge
+            if 0.10 <= yes_price <= 0.90:
+                claude_markets.append(market)
+
+    # Limit Claude calls to save API quota and avoid overload
+    claude_markets = claude_markets[:config.MAX_CLAUDE_CALLS]
+    print(f"[INFO] Step 4b: Evaluating {len(claude_markets)} markets with Claude (max {config.MAX_CLAUDE_CALLS})...")
     other_candidates = []
-    for market in (preferred + other)[:config.MAX_MARKETS_PER_CYCLE]:
+    for market in claude_markets:
         candidate = _evaluate_market(market, bankroll, peak_equity, recent_trades)
         if candidate:
             other_candidates.append(candidate)

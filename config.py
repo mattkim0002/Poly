@@ -133,7 +133,8 @@ LONGSHOT_HIGH = 0.20              # Apply correction below this price
 LONGSHOT_CORRECTION = 0.08        # +8% edge correction
 
 # === Claude AI ===
-CLAUDE_MODEL = "claude-haiku-4-5-20251001"  # Fast, cheap, rarely overloaded
+CLAUDE_MODEL = "claude-sonnet-4-6"
+MAX_CLAUDE_CALLS = 8              # Max Claude API calls per cycle — reduce load
 CLAUDE_MAX_TOKENS = 500
 
 # === Order Execution ===
