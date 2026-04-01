@@ -92,8 +92,8 @@ PREFERRED_KEYWORDS = {
 }
 
 # === Edge / EV Thresholds ===
-MIN_EDGE = 0.10                   # 10% minimum edge — only take high-conviction trades
-MIN_EDGE_CRYPTO = 0.05            # 5% minimum edge for crypto (was 1% — way too low)
+MIN_EDGE = 0.065                  # 6.5% minimum edge
+MIN_EDGE_CRYPTO = 0.03            # 3% minimum edge for crypto
 MIN_EV_PER_DOLLAR = 0.03          # $0.03 minimum EV per dollar risked
 
 # === Position Sizing ===
