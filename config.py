@@ -17,13 +17,13 @@ GAMMA_HOST = "https://gamma-api.polymarket.com"
 CHAIN_ID = 137  # Polygon
 
 # === Trading Cycle ===
-CYCLE_INTERVAL_SEC = 30            # 30 seconds — ultra fast for crypto
-MAX_MARKETS_PER_CYCLE = 50        # Scan lots of markets per cycle
+CYCLE_INTERVAL_SEC = 15            # 15 seconds — need to be fast for crypto sniping
+MAX_MARKETS_PER_CYCLE = 50         # Keep scanning lots
 
 # === Market Filters ===
-MIN_VOLUME = 1000                 # Higher minimum volume — more liquid markets = better pricing
-MIN_LIQUIDITY = 500               # Higher minimum liquidity
-MAX_DAYS_TO_RESOLUTION = 60       # Markets resolving within 60 days
+MIN_VOLUME = 500                   # Lower volume OK for crypto markets (they're new every 5 min)
+MIN_LIQUIDITY = 200                # Same — these are short-lived markets
+MAX_DAYS_TO_RESOLUTION = 1         # Only markets resolving within 1 day (5-min, 15-min, 1-hour)
 
 # === Sports Filter — skip these categories ===
 SPORTS_KEYWORDS = {
@@ -92,53 +92,59 @@ PREFERRED_KEYWORDS = {
 }
 
 # === Edge / EV Thresholds ===
-MIN_EDGE = 0.065                  # 6.5% minimum edge
-MIN_EDGE_CRYPTO = 0.03            # 3% minimum edge for crypto
-MIN_EV_PER_DOLLAR = 0.03          # $0.03 minimum EV per dollar risked
+MIN_EDGE = 0.03                    # 3% minimum edge for crypto (real-time data gives reliable edge)
+MIN_EDGE_CRYPTO = 0.03             # Same — all trades are crypto now
+MIN_EV_PER_DOLLAR = 0.01           # $0.01 — crypto edge is real but thin
 
 # === Position Sizing ===
-KELLY_FRACTION = 0.25             # 25% Kelly (true Quarter-Kelly)
-MAX_POSITION_PCT = 0.15           # Max 15% of bankroll per trade
-MAX_OPEN_POSITIONS = 5            # Fewer, higher-quality positions
-MIN_ORDER_SIZE_USD = 1.0          # Minimum order to place
+KELLY_FRACTION = 0.25              # Quarter-Kelly
+MAX_POSITION_PCT = 0.20            # 20% max per trade — we're high confidence
+MAX_OPEN_POSITIONS = 8             # Can have more positions since they resolve in 5 min
+MIN_ORDER_SIZE_USD = 1.0
 
 # === Risk Management (Chan Drawdown) ===
-DD_THRESHOLD_HALF = 0.20          # Halve size at 20% drawdown
-DD_THRESHOLD_STOP = 0.30          # Stop trading at 30% drawdown
+DD_THRESHOLD_HALF = 0.20           # Halve size at 20% drawdown
+DD_THRESHOLD_STOP = 0.30           # Stop trading at 30% drawdown
 
 # === Stop Loss / Take Profit ===
-STOP_LOSS_PCT = 0.0615            # Exit if position down 6.15% — hard stop-loss
-TAKE_PROFIT_PCT = 0.25            # Exit if position up 25% — let winners run
-TAKE_PROFIT_CRYPTO_PCT = 0.10     # Exit crypto 5-min markets at 10% profit
-TAKE_PROFIT_EDGE_MIN = 0.02       # Exit if edge drops below 2%
+STOP_LOSS_PCT = 0.0615             # 6.15% stop loss (user requirement)
+TAKE_PROFIT_PCT = 0.10             # 10% take profit for all crypto
+TAKE_PROFIT_CRYPTO_PCT = 0.10      # Same
+TAKE_PROFIT_EDGE_MIN = 0.01        # Exit if edge drops below 1%
 
-# === Crypto Short-Term Market Limits ===
-CRYPTO_MAX_POSITION_PCT = 0.20    # Max 20% of bankroll on a single crypto bet — aggressive
-CRYPTO_CHECK_INTERVAL_SEC = 10    # Check crypto positions every 10 seconds
+# === Crypto Position Limits ===
+CRYPTO_MAX_POSITION_PCT = 0.25     # 25% of bankroll per crypto bet — aggressive but controlled
+CRYPTO_CHECK_INTERVAL_SEC = 5      # Check positions every 5 seconds — speed matters
+
+# === Real-Time Edge Detection Thresholds ===
+MOMENTUM_THRESHOLD_STRONG = 0.15   # 0.15% move in 60 sec = strong signal
+MOMENTUM_THRESHOLD_MEDIUM = 0.08   # 0.08% move in 60 sec = medium signal
+MOMENTUM_WINDOW_SECONDS = 60       # Look at last 60 seconds of price action
+VOLUME_SPIKE_THRESHOLD = 2.0       # Volume must be 2x average to confirm move
 
 # === Daily Loss Limit ===
-DAILY_LOSS_PER_10 = 2.0           # Max $2 loss per $10 bankroll
+DAILY_LOSS_PER_10 = 2.0            # Max $2 loss per $10 bankroll
 
 # === Rolling Win Rate (Simons) ===
-WIN_RATE_WINDOW = 20              # Last N trades
-WIN_RATE_THRESHOLD = 0.55         # More aggressive cutback below 55% win rate
-MIN_TRADES_FOR_SIGNAL = 5         # Need at least this many trades
+WIN_RATE_WINDOW = 30               # Last 30 trades (more data since we trade often)
+WIN_RATE_THRESHOLD = 0.55          # Halve size below 55%
+MIN_TRADES_FOR_SIGNAL = 10         # Need 10 trades before adjusting
 
 # === Correlation Filter (Simons) ===
-CORRELATION_THRESHOLD = 0.60      # Skip if keyword overlap > 60%
+CORRELATION_THRESHOLD = 0.60       # Skip if keyword overlap > 60%
 
 # === Long-Shot Bias (Taleb) ===
-LONGSHOT_LOW = 0.05               # Apply correction above this price
-LONGSHOT_HIGH = 0.20              # Apply correction below this price
-LONGSHOT_CORRECTION = 0.02        # +2% edge correction — much more conservative
+LONGSHOT_LOW = 0.05                # Apply correction above this price
+LONGSHOT_HIGH = 0.20               # Apply correction below this price
+LONGSHOT_CORRECTION = 0.0          # DISABLED — not relevant for crypto
 
 # === Claude AI ===
-CLAUDE_MODEL = "claude-sonnet-4-6"
-MAX_CLAUDE_CALLS = 5              # Max Claude API calls per cycle — more selective
+MAX_CLAUDE_CALLS = 0               # ZERO — no Claude calls, pure data-driven
+CLAUDE_MODEL = "claude-sonnet-4-6" # Keep for potential future use
 CLAUDE_MAX_TOKENS = 500
 
 # === Order Execution ===
-PRICE_IMPROVEMENT = 0.01          # 1 cent price improvement — preserve edge
+PRICE_IMPROVEMENT = 0.01           # 1 cent — speed matters but preserve edge
 
 # === Database ===
 DB_PATH = "polybot.db"

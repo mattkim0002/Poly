@@ -103,6 +103,10 @@ def get_active_markets(limit: int = 100) -> list[dict]:
             "liquidity": liquidity,
         })
 
+    # CRYPTO ONLY: Filter for up/down markets when in crypto-only mode
+    if hasattr(config, 'MAX_CLAUDE_CALLS') and config.MAX_CLAUDE_CALLS == 0:
+        filtered = [m for m in filtered if "up or down" in (m.get("question", "") or "").lower()]
+
     log.info("Fetched %d markets, %d pass filters", len(markets), len(filtered))
     return filtered
 

@@ -1,8 +1,8 @@
-"""Polymarket Trading Bot — Bot Trader
+"""Polymarket Trading Bot — Crypto Sniper
 
-Runs a 5-minute cycle with full quant stack:
-Kelly Criterion, drawdown protection, long-shot bias,
-correlation filter, rolling win rate, R-multiples.
+Real-time crypto 5-minute market sniper.
+Detects Binance price momentum and trades Polymarket binary markets
+before they reprice. Pure data-driven — no Claude AI calls.
 """
 
 import sys
@@ -15,11 +15,11 @@ sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
 import config
-from core import database, market_data, trader, analyzer, crypto_predictor
+from core import database, market_data, trader, crypto_predictor
 from strategies import ev as ev_mod, filters, position_sizing
 from strategies.learner import (
     get_edge_adjustment, should_skip_market, get_size_multiplier,
-    print_learning_report, classify_market, record_loss_pattern,
+    print_learning_report, classify_market,
 )
 from strategies.risk import calculate_r_multiple, expectancy, drawdown_multiplier, drawdown
 from utils.logger import log
@@ -40,64 +40,22 @@ def _is_junk_market(question: str) -> bool:
     return False
 
 
-def _is_preferred_market(question: str) -> bool:
-    """Check if market matches preferred categories (crypto, politics, etc)."""
-    q_lower = question.lower()
-    for keyword in config.PREFERRED_KEYWORDS:
-        if keyword in q_lower:
-            return True
-    return False
-
-
 def _has_data_edge(question: str) -> bool:
-    """Only trade markets where we have a real informational advantage.
+    """Only trade crypto up/down markets — we have real-time Binance edge.
 
-    We ONLY trade:
-    - Crypto up/down (we have Binance TA)
-    - Crypto price targets (Claude + news)
-    - Major geopolitical (Iran, Russia, Ukraine, China — Claude + news)
-    - US politics (Trump, elections — Claude + news)
-    - Finance/economics (Fed, oil, tariffs — Claude + news)
-
-    We DO NOT trade:
-    - Obscure local elections nobody knows about
-    - Social media post counts
-    - Random person behavior predictions
-    - Niche markets with no data available
+    In crypto-only mode (MAX_CLAUDE_CALLS == 0), we ONLY trade markets
+    where we can detect real-time price momentum from exchanges.
     """
     q_lower = question.lower()
 
-    # Crypto — always have Binance data edge
+    # Crypto up/down markets — always have Binance momentum edge
     crypto_terms = {"bitcoin", "btc", "ethereum", "eth", "solana", "sol",
                     "xrp", "dogecoin", "doge", "cardano", "crypto",
-                    "up or down", "defi", "token price", "market cap"}
+                    "up or down"}
     if any(t in q_lower for t in crypto_terms):
         return True
 
-    # Major geopolitical — Claude + live news gives real edge
-    geo_terms = {"iran", "russia", "ukraine", "china", "taiwan", "nato",
-                 "sanctions", "ceasefire", "missile", "nuclear", "war ",
-                 "invasion", "israel", "gaza", "north korea", "military"}
-    if any(t in q_lower for t in geo_terms):
-        return True
-
-    # US politics — ONLY high-profile, well-covered US politics
-    politics_terms = {"trump", "biden", "congress", "senate", "supreme court",
-                      "executive order", "impeach", "indictment",
-                      "white house", "midterm",
-                      "desantis", "rfk", "vance"}
-    if any(t in q_lower for t in politics_terms):
-        return True
-
-    # Finance/economics — real data available
-    finance_terms = {"fed ", "interest rate", "inflation", "gdp", "tariff",
-                     "oil price", "crude oil", "wti", "gold price",
-                     "s&p 500", "nasdaq", "dow jones", "recession",
-                     "unemployment", "cpi", "treasury", "bond yield"}
-    if any(t in q_lower for t in finance_terms):
-        return True
-
-    # Everything else — no edge, skip it
+    # Everything else — no edge without Claude
     return False
 
 
@@ -108,19 +66,22 @@ def _daily_loss_limit(bankroll: float) -> float:
 
 def _print_banner(bankroll: float):
     mode = "LIVE TRADING" if not config.DRY_RUN else "DRY RUN"
-    mode_icon = "⚠️  LIVE TRADING ⚠️" if not config.DRY_RUN else "🧪 DRY RUN"
+    mode_icon = "LIVE TRADING" if not config.DRY_RUN else "DRY RUN"
     print()
-    print("╔══════════════════════════════════════════════════════╗")
-    print("║                    BOT TRADER                       ║")
-    print(f"║  Mode:        {mode_icon:<39}║")
-    print(f"║  Bankroll:    ${bankroll:<39.2f}║")
-    print(f"║  Min edge:    {config.MIN_EDGE:.0%}{'':<37}║")
-    print(f"║  Kelly:       {config.KELLY_FRACTION:.0%} (Quarter-Kelly){'':<24}║")
-    print(f"║  Max position: {config.MAX_POSITION_PCT:.0%} of bankroll{'':<26}║")
-    print("╚══════════════════════════════════════════════════════╝")
+    print("======================================================")
+    print("               CRYPTO SNIPER                          ")
+    print(f"  Mode:        {mode_icon:<39}")
+    print(f"  Bankroll:    ${bankroll:<39.2f}")
+    print(f"  Min edge:    {config.MIN_EDGE:.0%}{'':<37}")
+    print(f"  Kelly:       {config.KELLY_FRACTION:.0%} (Quarter-Kelly){'':<24}")
+    print(f"  Max position: {config.MAX_POSITION_PCT:.0%} of bankroll{'':<26}")
+    print(f"  Cycle:       {config.CYCLE_INTERVAL_SEC}s{'':<36}")
+    print(f"  Momentum:    >{config.MOMENTUM_THRESHOLD_MEDIUM}% (med) >{config.MOMENTUM_THRESHOLD_STRONG}% (strong)")
+    print(f"  Claude:      DISABLED (pure data-driven){'':<16}")
+    print("======================================================")
     print()
     if not config.DRY_RUN:
-        print("⚠️  WARNING: LIVE TRADING MODE ENABLED")
+        print("WARNING: LIVE TRADING MODE ENABLED")
         print("Real money will be used.")
         print()
 
@@ -139,26 +100,26 @@ def _print_portfolio(bankroll: float, open_trades: list[dict], recent_trades: li
     session_pct = (session_profit / _session_start_bankroll * 100) if _session_start_bankroll > 0 else 0.0
 
     print()
-    print("┌─────────────── PORTFOLIO ───────────────┐")
-    print(f"│  Session start:     ${_session_start_bankroll:<20.2f}│")
-    print(f"│  Cash:              ${bankroll:<20.2f}│")
-    print(f"│  Positions (live):  ${live_pos_value:<20.2f}│")
-    print(f"│  Total equity:      ${total_equity:<20.2f}│")
-    print(f"│  Session profit:    ${session_profit:<+20.2f}│")
-    print(f"│  Session growth:    {session_pct:<+20.1f}% │")
-    print(f"│  Open positions:    {num_positions:<21}│")
-    print(f"│  Available to trade:${bankroll:<20.2f}│")
-    print(f"│  Daily P&L:        ${_daily_pnl:<+20.2f}│")
-    print(f"│  Daily loss limit:  ${daily_limit:<20.2f}│")
+    print("------------- PORTFOLIO ---------------")
+    print(f"  Session start:     ${_session_start_bankroll:<20.2f}")
+    print(f"  Cash:              ${bankroll:<20.2f}")
+    print(f"  Positions (live):  ${live_pos_value:<20.2f}")
+    print(f"  Total equity:      ${total_equity:<20.2f}")
+    print(f"  Session profit:    ${session_profit:<+20.2f}")
+    print(f"  Session growth:    {session_pct:<+20.1f}%")
+    print(f"  Open positions:    {num_positions:<21}")
+    print(f"  Available to trade:${bankroll:<20.2f}")
+    print(f"  Daily P&L:        ${_daily_pnl:<+20.2f}")
+    print(f"  Daily loss limit:  ${daily_limit:<20.2f}")
 
     if recent_trades:
         wins = sum(1 for t in recent_trades if (t.get("pnl") or 0) > 0)
         win_rate = wins / len(recent_trades) if recent_trades else 0
         exp = expectancy(recent_trades)
-        print(f"│  Win rate:          {win_rate:<20.1%}│")
-        print(f"│  Expectancy:        {exp:<+20.2f}R │")
+        print(f"  Win rate:          {win_rate:<20.1%}")
+        print(f"  Expectancy:        {exp:<+20.2f}R")
 
-    print("└─────────────────────────────────────────┘")
+    print("---------------------------------------")
     print()
 
 
@@ -173,7 +134,7 @@ def run_cycle():
         _daily_pnl = 0.0
         _daily_date = today
 
-    print(f"\n[INFO] ═══ CYCLE {_cycle_count} STARTING ═══")
+    print(f"\n[INFO] === CYCLE {_cycle_count} STARTING ===")
 
     # --- Step 1: Get account state ---
     print("[INFO] Step 1: Checking account state...")
@@ -232,7 +193,7 @@ def run_cycle():
         return
 
     # --- Step 4: Scan markets ---
-    print("[INFO] Step 3: Scanning markets...")
+    print("[INFO] Step 3: Scanning crypto markets...")
     markets = market_data.get_active_markets(limit=config.MAX_MARKETS_PER_CYCLE)
     if not markets:
         print("[INFO] No markets pass filters")
@@ -257,46 +218,19 @@ def run_cycle():
     open_token_ids = {t["token_id"] for t in open_trades}
     markets = [m for m in markets if not any(tid in open_token_ids for tid in m.get("token_ids", []))]
 
-    # CRYPTO FIRST — separate crypto from everything else
+    # CRYPTO ONLY — only keep crypto up/down markets
     crypto_markets = [m for m in markets if crypto_predictor.is_crypto_updown_market(m.get("question", ""))]
-    preferred = [m for m in markets if not crypto_predictor.is_crypto_updown_market(m.get("question", "")) and _is_preferred_market(m.get("question", ""))]
-    other = [m for m in markets if m not in crypto_markets and m not in preferred]
+    markets = crypto_markets
+    print(f"[INFO] {len(crypto_markets)} crypto up/down markets to evaluate")
 
-    # Crypto first, then preferred, then other
-    markets = crypto_markets + preferred + other
-    print(f"[INFO] {len(crypto_markets)} crypto markets | {len(preferred)} preferred | {len(other)} other")
-    print(f"[INFO] {len(markets)} total markets to evaluate")
-
-    # --- Step 5: Estimate probabilities ---
-    # Evaluate crypto FIRST (no Claude needed — uses Binance data, instant)
-    print("[INFO] Step 4a: Evaluating crypto markets (Binance)...")
-    crypto_candidates = []
+    # --- Step 5: Evaluate crypto markets (Binance momentum — no Claude) ---
+    print("[INFO] Step 4: Evaluating crypto markets (Binance momentum)...")
+    candidates = []
     for market in crypto_markets:
         candidate = _evaluate_market(market, bankroll, peak_equity, recent_trades)
         if candidate:
-            crypto_candidates.append(candidate)
-            print(f"  🔥 CRYPTO HIT: {candidate['question'][:50]} | Edge: {candidate['edge']:.1%}")
-
-    # Pre-filter non-crypto: skip markets where price is too close to 0 or 1 (no edge)
-    claude_markets = []
-    for market in (preferred + other):
-        prices = market.get("outcome_prices", [])
-        if prices:
-            yes_price = prices[0]
-            # Only evaluate markets priced 0.10-0.90 — extremes have no edge
-            if 0.10 <= yes_price <= 0.90:
-                claude_markets.append(market)
-
-    # Limit Claude calls to save API quota and avoid overload
-    claude_markets = claude_markets[:config.MAX_CLAUDE_CALLS]
-    print(f"[INFO] Step 4b: Evaluating {len(claude_markets)} markets with Claude (max {config.MAX_CLAUDE_CALLS})...")
-    other_candidates = []
-    for market in claude_markets:
-        candidate = _evaluate_market(market, bankroll, peak_equity, recent_trades)
-        if candidate:
-            other_candidates.append(candidate)
-
-    candidates = crypto_candidates + other_candidates
+            candidates.append(candidate)
+            print(f"  CRYPTO HIT: {candidate['question'][:50]} | Edge: {candidate['edge']:.1%}")
 
     # --- Step 6: Top opportunities ---
     if not candidates:
@@ -305,35 +239,17 @@ def run_cycle():
         _print_portfolio(bankroll, open_trades, recent_trades)
         return
 
-    # Correlation filter (don't filter crypto against each other)
-    if len(other_candidates) > 1:
-        before_corr = len(other_candidates)
-        other_candidates = filters.filter_correlated(other_candidates)
-        if before_corr != len(other_candidates):
-            print(f"[INFO] Filtered {before_corr - len(other_candidates)} correlated markets")
-    candidates = crypto_candidates + other_candidates
-
     print(f"\n[INFO] Step 5: Top opportunities found ({len(candidates)}):")
     for c in candidates:
-        is_c = crypto_predictor.is_crypto_updown_market(c['question'])
-        tag = "🔥 CRYPTO" if is_c else "  "
-        print(f"  {tag} {c['question'][:50]}")
+        print(f"  CRYPTO {c['question'][:50]}")
         print(f"    {c['outcome']} @ {c['market_price']:.2f} | Edge: {c['edge']:.1%} | EV: ${c['ev']:.3f}")
 
-    # --- Step 7: Execute trades — CRYPTO FIRST ---
-    print("\n[INFO] Step 6: Executing trades (crypto priority)...")
+    # --- Step 7: Execute trades ---
+    print("\n[INFO] Step 6: Executing trades...")
     slots_available = config.MAX_OPEN_POSITIONS - len(open_trades)
     trades_placed = 0
 
-    # Execute crypto trades first
-    for candidate in crypto_candidates[:slots_available]:
-        placed = _execute_trade(candidate, bankroll, peak_equity, recent_trades, total_equity)
-        if placed:
-            trades_placed += 1
-            slots_available -= 1
-
-    # Then other trades
-    for candidate in other_candidates[:slots_available]:
+    for candidate in candidates[:slots_available]:
         placed = _execute_trade(candidate, bankroll, peak_equity, recent_trades, total_equity)
         if placed:
             trades_placed += 1
@@ -368,38 +284,22 @@ def _evaluate_market(market: dict, bankroll: float, peak_equity: float, recent_t
     if yes_price <= 0.01 or yes_price >= 0.99:
         return None
 
+    # Only evaluate crypto up/down markets
+    if not crypto_predictor.is_crypto_updown_market(question):
+        return None
+
     # LEARNING: Skip categories that have been losing money
     skip, reason = should_skip_market(question)
     if skip:
         print(f"  [LEARN] Skipping '{question[:40]}' — {reason}")
         return None
 
-    # Use crypto predictor for Up/Down markets, Claude for everything else
-    if crypto_predictor.is_crypto_updown_market(question):
-        estimate = crypto_predictor.estimate_crypto_probability(
-            question, yes_price, outcomes[0] if outcomes else "Yes"
-        )
-        if not estimate:
-            return None
-    else:
-        estimate = analyzer.estimate_probability(question, outcomes, outcome_prices)
-        if not estimate:
-            return None
-        if estimate["confidence"] == "low":
-            return None
-
-        # Skip if Claude says "no edge" or reasoning is weak
-        reasoning = estimate.get("reasoning", "").lower()
-        if "no edge" in reasoning or "uncertain" in reasoning or "coin flip" in reasoning:
-            print(f"  [SKIP] No edge: '{question[:40]}' — {reasoning[:60]}")
-            return None
-
-        # For medium confidence, require bigger edge (15%)
-        if estimate["confidence"] == "medium":
-            yes_edge_check = abs(estimate["probability"] - yes_price)
-            if yes_edge_check < 0.15:
-                print(f"  [SKIP] Medium conf, weak edge ({yes_edge_check:.0%}): '{question[:40]}'")
-                return None
+    # Use crypto momentum predictor
+    estimate = crypto_predictor.estimate_crypto_probability(
+        question, yes_price, outcomes[0] if outcomes else "Yes"
+    )
+    if not estimate:
+        return None
 
     claude_prob = estimate["probability"]
 
@@ -422,9 +322,7 @@ def _evaluate_market(market: dict, bankroll: float, peak_equity: float, recent_t
         else:
             print(f"  [LEARN] Edge penalty {edge_adj:.2%} for '{cat}' (losing category)")
 
-    # Use lower edge threshold for crypto — more aggressive
-    is_crypto = crypto_predictor.is_crypto_updown_market(question)
-    min_edge = config.MIN_EDGE_CRYPTO if is_crypto else config.MIN_EDGE
+    min_edge = config.MIN_EDGE_CRYPTO
 
     # Pick the better side
     if yes_edge_adj > no_edge_adj and yes_edge_adj >= min_edge:
@@ -495,23 +393,21 @@ def _execute_trade(candidate: dict, bankroll: float, peak_equity: float, recent_
     cost = shares * price
 
     # Cap crypto 5-min market bets at CRYPTO_MAX_POSITION_PCT of bankroll
-    is_crypto = crypto_predictor.is_crypto_updown_market(candidate["question"])
-    if is_crypto:
-        max_cost = bankroll * config.CRYPTO_MAX_POSITION_PCT
-        if cost > max_cost:
-            shares = max(5, max_cost / price)
-            cost = shares * price
-            print(f"  [CAP] Crypto 5-min bet capped: ${cost:.2f} (max {config.CRYPTO_MAX_POSITION_PCT:.0%} of bankroll)")
+    max_cost = bankroll * config.CRYPTO_MAX_POSITION_PCT
+    if cost > max_cost:
+        shares = max(5, max_cost / price)
+        cost = shares * price
+        print(f"  [CAP] Crypto 5-min bet capped: ${cost:.2f} (max {config.CRYPTO_MAX_POSITION_PCT:.0%} of bankroll)")
 
-    print(f"\n  ╔═ PLACING ORDER ═══════════════════════════════════╗")
-    print(f"  ║  Market:  {candidate['question'][:42]:<43}║")
-    print(f"  ║  Side:    {candidate['side']} {candidate['outcome']:<40}║")
-    print(f"  ║  Price:   ${price:<42.2f}║")
-    print(f"  ║  Shares:  {shares:<42.1f}║")
-    print(f"  ║  Cost:    ${cost:<42.2f}║")
-    print(f"  ║  Edge:    {candidate['edge']:<42.1%}║")
-    print(f"  ║  Kelly:   {sizing['raw_kelly']:<42.3f}║")
-    print(f"  ╚═════════════════════════════════════════════════════╝")
+    print(f"\n  == PLACING ORDER ===========================")
+    print(f"  Market:  {candidate['question'][:42]}")
+    print(f"  Side:    {candidate['side']} {candidate['outcome']}")
+    print(f"  Price:   ${price:.2f}")
+    print(f"  Shares:  {shares:.1f}")
+    print(f"  Cost:    ${cost:.2f}")
+    print(f"  Edge:    {candidate['edge']:.1%}")
+    print(f"  Kelly:   {sizing['raw_kelly']:.3f}")
+    print(f"  ============================================")
 
     order_id = trader.place_limit_order(
         token_id=candidate["token_id"],
@@ -538,10 +434,10 @@ def _execute_trade(candidate: dict, bankroll: float, peak_equity: float, recent_
             dd_mult=sizing["dd_multiplier"],
             signal_mult=sizing["signal_multiplier"],
         )
-        print(f"  ✅ Order placed: {order_id}")
+        print(f"  Order placed: {order_id}")
         return True
     else:
-        print("  ❌ Order failed")
+        print("  Order failed")
         return False
 
 
@@ -607,7 +503,7 @@ def _check_existing_positions(open_trades: list[dict]):
             database.update_trade_result(trade["id"], current_price, pnl, r_mult, "won")
             _daily_pnl += pnl
             label = "CRYPTO TP" if is_crypto else "TAKE PROFIT"
-            print(f"  💰 {label}: '{question[:40]}' | +{gain_pct:.0%} | PnL=${pnl:.2f}")
+            print(f"  {label}: '{question[:40]}' | +{gain_pct:.0%} | PnL=${pnl:.2f}")
 
             # Cancel pending orders to free balance, then sell
             if not config.DRY_RUN:
@@ -627,10 +523,7 @@ def _check_existing_positions(open_trades: list[dict]):
             r_mult = calculate_r_multiple(avg_price, current_price, avg_price)
             database.update_trade_result(trade["id"], current_price, pnl, r_mult, "lost")
             _daily_pnl += pnl
-            print(f"  🛑 STOP LOSS: '{question[:40]}' | PnL=${pnl:.2f}")
-
-            # Record the loss pattern for learning
-            record_loss_pattern(question, entry_price=avg_price, exit_price=current_price, loss_pct=loss_pct)
+            print(f"  STOP LOSS: '{question[:40]}' | PnL=${pnl:.2f}")
 
             # Cancel pending orders to free balance, then sell
             if not config.DRY_RUN:
@@ -648,13 +541,13 @@ def _check_existing_positions(open_trades: list[dict]):
             r_mult = calculate_r_multiple(entry_price, 1.0, entry_price)
             database.update_trade_result(trade["id"], 1.0, pnl, r_mult, "won")
             _daily_pnl += pnl
-            print(f"  ✅ WIN: '{trade['market_question'][:40]}' | PnL=${pnl:+.2f} | R={r_mult:+.2f}")
+            print(f"  WIN: '{trade['market_question'][:40]}' | PnL=${pnl:+.2f} | R={r_mult:+.2f}")
         elif current_price <= 0.05:
             pnl = -entry_price * trade["size"]
             r_mult = calculate_r_multiple(entry_price, 0.0, entry_price)
             database.update_trade_result(trade["id"], 0.0, pnl, r_mult, "lost")
             _daily_pnl += pnl
-            print(f"  ❌ LOSS: '{trade['market_question'][:40]}' | PnL=${pnl:.2f} | R={r_mult:.2f}")
+            print(f"  LOSS: '{trade['market_question'][:40]}' | PnL=${pnl:.2f} | R={r_mult:.2f}")
 
 
 def _record_equity(bankroll: float, positions_value: float = 0.0):
@@ -747,7 +640,7 @@ def _sync_polymarket_positions():
 
 
 def main():
-    """Main loop — run trading cycle every 5 minutes."""
+    """Main loop — crypto sniper running every 15 seconds."""
     global _session_start_bankroll
     database.init_db()
 
@@ -767,15 +660,16 @@ def main():
     print(f"[INFO] Peak equity reset to ${total_equity:.2f}")
 
     print(f"[INFO] Bot started | Cycle interval: {config.CYCLE_INTERVAL_SEC}s")
-    print(f"[INFO] Markets: Crypto (priority), Politics, Climate, Finance, World events")
-    print(f"[INFO] Excluded: Sports & esports markets")
+    print(f"[INFO] Markets: Crypto 5-min Up/Down ONLY")
+    print(f"[INFO] Strategy: Real-time Binance momentum detection")
+    print(f"[INFO] Claude: DISABLED (pure data-driven)")
     print()
 
     while True:
         try:
             run_cycle()
         except KeyboardInterrupt:
-            print("\n[INFO] Shutting down Bot Trader...")
+            print("\n[INFO] Shutting down Crypto Sniper...")
             break
         except Exception:
             print(f"[ERROR] Cycle failed:\n{traceback.format_exc()}")
@@ -796,7 +690,7 @@ def main():
                     if crypto_trades:
                         _check_existing_positions(crypto_trades)
         except KeyboardInterrupt:
-            print("\n[INFO] Shutting down Bot Trader...")
+            print("\n[INFO] Shutting down Crypto Sniper...")
             break
 
 
