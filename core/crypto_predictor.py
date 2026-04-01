@@ -205,6 +205,174 @@ def get_realtime_momentum(symbol: str) -> dict | None:
     }
 
 
+def get_orderbook_imbalance(symbol: str) -> dict | None:
+    """Fetch order book and calculate bid/ask imbalance.
+
+    A bid_ratio > 0.60 means more buy pressure (bullish).
+    A bid_ratio < 0.40 means more sell pressure (bearish).
+    """
+    try:
+        resp = httpx.get(
+            "https://api.binance.com/api/v3/depth",
+            params={"symbol": symbol, "limit": 20},
+            timeout=5,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        # Sum bid and ask volumes (top 20 levels)
+        bid_volume = sum(float(level[1]) for level in data.get("bids", []))
+        ask_volume = sum(float(level[1]) for level in data.get("asks", []))
+        total = bid_volume + ask_volume
+
+        if total <= 0:
+            return None
+
+        bid_ratio = bid_volume / total  # > 0.5 = more buyers
+
+        # Check for thin walls — if asks are very thin, price can move up easily
+        top_5_asks = sum(float(level[1]) for level in data.get("asks", [])[:5])
+        top_5_bids = sum(float(level[1]) for level in data.get("bids", [])[:5])
+        thin_asks = top_5_asks < top_5_bids * 0.3  # Asks are <30% of bids at top levels
+        thin_bids = top_5_bids < top_5_asks * 0.3  # Bids are <30% of asks at top levels
+
+        return {
+            "bid_ratio": bid_ratio,
+            "bid_volume": bid_volume,
+            "ask_volume": ask_volume,
+            "thin_asks": thin_asks,  # Easy to push price up
+            "thin_bids": thin_bids,  # Easy to push price down
+        }
+    except Exception as e:
+        log.debug("Failed to fetch orderbook for %s: %s", symbol, e)
+        return None
+
+
+def get_large_trades(symbol: str) -> dict | None:
+    """Detect large/whale trades in the last minute.
+
+    A large trade is one that's > 5x the median trade size.
+    """
+    try:
+        resp = httpx.get(
+            "https://api.binance.com/api/v3/aggTrades",
+            params={"symbol": symbol, "limit": 200},
+            timeout=5,
+        )
+        resp.raise_for_status()
+        trades = resp.json()
+
+        if not trades:
+            return None
+
+        # Calculate trade sizes in quote currency (price * qty)
+        trade_sizes = []
+        buy_volume = 0.0
+        sell_volume = 0.0
+
+        for t in trades:
+            qty = float(t["q"])
+            price = float(t["p"])
+            size_usd = qty * price
+            trade_sizes.append(size_usd)
+
+            # m=True means the buyer is the maker (so it's a SELL/taker sell)
+            if t.get("m", False):
+                sell_volume += size_usd
+            else:
+                buy_volume += size_usd
+
+        if not trade_sizes:
+            return None
+
+        # Find large trades (> 5x median)
+        sorted_sizes = sorted(trade_sizes)
+        median_size = sorted_sizes[len(sorted_sizes) // 2]
+        large_threshold = median_size * 5
+
+        large_buys = sum(1 for i, t in enumerate(trades) if trade_sizes[i] > large_threshold and not t.get("m", False))
+        large_sells = sum(1 for i, t in enumerate(trades) if trade_sizes[i] > large_threshold and t.get("m", False))
+
+        total_volume = buy_volume + sell_volume
+        taker_buy_ratio = buy_volume / total_volume if total_volume > 0 else 0.5
+
+        # Trade frequency — number of trades in the sample
+        trade_count = len(trades)
+
+        return {
+            "large_buys": large_buys,
+            "large_sells": large_sells,
+            "taker_buy_ratio": taker_buy_ratio,
+            "trade_count": trade_count,
+            "net_large": large_buys - large_sells,  # Positive = whale buying
+        }
+    except Exception as e:
+        log.debug("Failed to fetch aggTrades for %s: %s", symbol, e)
+        return None
+
+
+def get_funding_rate(symbol: str) -> dict | None:
+    """Fetch funding rate from Binance futures.
+
+    Positive funding = longs pay shorts (overleveraged long, bearish signal)
+    Negative funding = shorts pay longs (overleveraged short, bullish signal)
+    Extreme values (> 0.01% or < -0.01%) are contrarian signals.
+    """
+    try:
+        resp = httpx.get(
+            "https://fapi.binance.com/fapi/v1/premiumIndex",
+            params={"symbol": symbol},
+            timeout=5,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        funding_rate = float(data.get("lastFundingRate", 0))
+        mark_price = float(data.get("markPrice", 0))
+
+        # Extreme funding = contrarian signal
+        is_extreme_long = funding_rate > 0.0005   # > 0.05% = overleveraged long
+        is_extreme_short = funding_rate < -0.0005  # < -0.05% = overleveraged short
+
+        return {
+            "funding_rate": funding_rate,
+            "mark_price": mark_price,
+            "is_extreme_long": is_extreme_long,   # Contrarian bearish
+            "is_extreme_short": is_extreme_short,  # Contrarian bullish
+        }
+    except Exception as e:
+        log.debug("Failed to fetch funding rate for %s: %s", symbol, e)
+        return None
+
+
+def get_open_interest(symbol: str) -> dict | None:
+    """Fetch open interest from Binance futures.
+
+    Rising OI + rising price = strong trend (new money entering)
+    Rising OI + falling price = strong downtrend
+    Falling OI = positions closing, move may not sustain
+    """
+    try:
+        resp = httpx.get(
+            "https://fapi.binance.com/fapi/v1/openInterest",
+            params={"symbol": symbol},
+            timeout=5,
+        )
+        resp.raise_for_status()
+        current = resp.json()
+        current_oi = float(current.get("openInterest", 0))
+
+        if current_oi <= 0:
+            return None
+
+        return {
+            "open_interest": current_oi,
+        }
+    except Exception as e:
+        log.debug("Failed to fetch open interest for %s: %s", symbol, e)
+        return None
+
+
 def estimate_crypto_probability(question: str, market_price: float, outcome: str) -> dict | None:
     """Estimate probability using real-time momentum from Binance.
 
@@ -289,8 +457,80 @@ def estimate_crypto_probability(question: str, market_price: float, outcome: str
         boosters += 1
         booster_details.append(f"sell_pressure:{1-buy_pressure:.0%}")
 
-    # Cap probability at 0.80
-    base_prob = min(0.80, base_prob)
+    # === Additional data sources as boosters ===
+
+    # Order book imbalance
+    orderbook = get_orderbook_imbalance(symbol)
+    if orderbook:
+        if signal_up and orderbook["bid_ratio"] > 0.60:
+            base_prob += 0.03
+            boosters += 1
+            booster_details.append(f"ob_bid:{orderbook['bid_ratio']:.0%}")
+        elif not signal_up and orderbook["bid_ratio"] < 0.40:
+            base_prob += 0.03
+            boosters += 1
+            booster_details.append(f"ob_ask:{1-orderbook['bid_ratio']:.0%}")
+        # Thin wall detection — strong signal
+        if signal_up and orderbook.get("thin_asks"):
+            base_prob += 0.02
+            boosters += 1
+            booster_details.append("thin_asks")
+        elif not signal_up and orderbook.get("thin_bids"):
+            base_prob += 0.02
+            boosters += 1
+            booster_details.append("thin_bids")
+
+    # Large trade / whale detection
+    large_trades = get_large_trades(symbol)
+    if large_trades:
+        net_large = large_trades["net_large"]
+        if signal_up and net_large >= 2:
+            base_prob += 0.04
+            boosters += 1
+            booster_details.append(f"whale_buy:{net_large}")
+        elif not signal_up and net_large <= -2:
+            base_prob += 0.04
+            boosters += 1
+            booster_details.append(f"whale_sell:{abs(net_large)}")
+        # Taker buy ratio confirmation
+        tbr = large_trades["taker_buy_ratio"]
+        if signal_up and tbr > 0.60:
+            base_prob += 0.02
+            boosters += 1
+            booster_details.append(f"taker_buy:{tbr:.0%}")
+        elif not signal_up and tbr < 0.40:
+            base_prob += 0.02
+            boosters += 1
+            booster_details.append(f"taker_sell:{1-tbr:.0%}")
+
+    # Funding rate — CONTRARIAN signal (filter, not booster)
+    # If momentum says UP but funding is extremely positive, the move might reverse
+    funding = get_funding_rate(symbol)
+    if funding:
+        if signal_up and funding["is_extreme_long"]:
+            base_prob -= 0.03  # Penalize — overleveraged longs may get squeezed down
+            booster_details.append(f"funding_warn:{funding['funding_rate']:.4%}")
+        elif not signal_up and funding["is_extreme_short"]:
+            base_prob -= 0.03  # Penalize — overleveraged shorts may get squeezed up
+            booster_details.append(f"funding_warn:{funding['funding_rate']:.4%}")
+        elif signal_up and funding["is_extreme_short"]:
+            base_prob += 0.02  # Confirms — shorts overleveraged, squeeze up likely
+            boosters += 1
+            booster_details.append(f"funding_confirms:{funding['funding_rate']:.4%}")
+        elif not signal_up and funding["is_extreme_long"]:
+            base_prob += 0.02  # Confirms — longs overleveraged, squeeze down likely
+            boosters += 1
+            booster_details.append(f"funding_confirms:{funding['funding_rate']:.4%}")
+
+    # Open interest — confirmation signal
+    oi_data = get_open_interest(symbol)
+    if oi_data:
+        # We can't easily compare to previous OI in a stateless check,
+        # so just log it in the reasoning for now
+        booster_details.append(f"oi:{oi_data['open_interest']:.0f}")
+
+    # Cap probability at 0.85 (was 0.80 — more data sources justify higher confidence)
+    base_prob = max(0.20, min(0.85, base_prob))
 
     # === Confidence level ===
     if signal_strength == "strong" and boosters >= 2:

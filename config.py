@@ -122,6 +122,12 @@ MOMENTUM_THRESHOLD_MEDIUM = 0.08   # 0.08% move in 60 sec = medium signal
 MOMENTUM_WINDOW_SECONDS = 60       # Look at last 60 seconds of price action
 VOLUME_SPIKE_THRESHOLD = 2.0       # Volume must be 2x average to confirm move
 
+# === Order Book / Whale Detection Thresholds ===
+ORDERBOOK_IMBALANCE_THRESHOLD = 0.60  # 60% bid ratio = bullish imbalance
+LARGE_TRADE_MULTIPLIER = 5            # Trade > 5x median = "large"
+WHALE_NET_THRESHOLD = 2               # Net 2+ large buys = whale signal
+FUNDING_EXTREME_THRESHOLD = 0.0005    # 0.05% funding rate = extreme
+
 # === Daily Loss Limit ===
 DAILY_LOSS_PER_10 = 2.0            # Max $2 loss per $10 bankroll
 
