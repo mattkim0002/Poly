@@ -21,8 +21,8 @@ CYCLE_INTERVAL_SEC = 15            # 15 seconds — need to be fast for crypto s
 MAX_MARKETS_PER_CYCLE = 50         # Keep scanning lots
 
 # === Market Filters ===
-MIN_VOLUME = 500                   # Lower volume OK for crypto markets (they're new every 5 min)
-MIN_LIQUIDITY = 200                # Same — these are short-lived markets
+MIN_VOLUME = 5                     # Very low — crypto 5-min markets are brand new with little volume
+MIN_LIQUIDITY = 100                # Low — these are short-lived markets
 MAX_DAYS_TO_RESOLUTION = 1         # Only markets resolving within 1 day (5-min, 15-min, 1-hour)
 
 # === Sports Filter — skip these categories ===
