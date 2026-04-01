@@ -162,21 +162,38 @@ def get_edge_adjustment(question: str, market_price: float) -> float:
     return round(adjustment, 4)
 
 
+def record_loss_pattern(question: str, entry_price: float, exit_price: float, loss_pct: float):
+    """Classify a stop-loss exit and record it for future avoidance."""
+    category = classify_market(question)
+    price_range = classify_price_range(entry_price)
+    database.record_loss_pattern(question, category, price_range, loss_pct)
+    log.info("Loss pattern recorded: %s/%s loss=%.1f%% — '%s'",
+             category, price_range, loss_pct * 100, question[:50])
+
+
 def should_skip_market(question: str) -> tuple[bool, str]:
     """Check if we should skip this market based on learning.
 
     Returns (should_skip, reason).
-    Never skips crypto — we always want at least one aggressive play.
+    Crypto can be skipped if win rate is really bad (< 35% over 10+ trades).
+    Also skips category+price_range combos with 3+ stop-loss patterns.
     """
     stats = get_performance_stats()
     category = classify_market(question)
     cat_stats = stats["categories"].get(category)
 
     if not cat_stats or cat_stats["total_trades"] < MIN_TRADES_FOR_LEARNING:
+        # Even without enough category stats, check loss patterns
+        price_range = classify_price_range(0.5)  # default mid
+        loss_patterns = database.get_loss_patterns(category, price_range, limit=20)
+        if len(loss_patterns) >= 3:
+            return True, f"category '{category}/{price_range}' has {len(loss_patterns)} stop-loss exits — avoiding"
         return False, ""
 
-    # NEVER skip crypto — always allow aggressive crypto plays (just reduce size)
+    # Crypto can be skipped too if it's been REALLY bad
     if category == "crypto":
+        if cat_stats["win_rate"] < 0.35 and cat_stats["total_trades"] >= 10:
+            return True, f"crypto win rate {cat_stats['win_rate']:.0%} over {cat_stats['total_trades']} trades — pausing"
         return False, ""
 
     # Skip category if: 0% win rate with 3+ trades
@@ -190,6 +207,13 @@ def should_skip_market(question: str) -> tuple[bool, str]:
     # Skip if win rate under 25% with enough data
     if cat_stats["win_rate"] < 0.25 and cat_stats["total_trades"] >= 5:
         return True, f"category '{category}' win rate {cat_stats['win_rate']:.0%} over {cat_stats['total_trades']} trades"
+
+    # Skip category+price_range combos with 3+ stop-loss exits in recent patterns
+    # Use a representative price (mid-range) for classification
+    for pr in ["cheap", "mid", "expensive"]:
+        loss_patterns = database.get_loss_patterns(category, pr, limit=20)
+        if len(loss_patterns) >= 3:
+            return True, f"category '{category}/{pr}' has {len(loss_patterns)} stop-loss exits — avoiding"
 
     return False, ""
 

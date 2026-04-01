@@ -49,6 +49,15 @@ CREATE TABLE IF NOT EXISTS market_cache (
     keywords TEXT,
     last_updated TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS loss_patterns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    market_question TEXT,
+    category TEXT,
+    price_range TEXT,
+    loss_pct REAL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -187,3 +196,28 @@ def get_cached_keywords(token_id: str) -> list[str] | None:
     if row and row["keywords"]:
         return json.loads(row["keywords"])
     return None
+
+
+def record_loss_pattern(question: str, category: str, price_range: str, loss_pct: float):
+    """Record a stop-loss exit pattern for learning."""
+    conn = get_connection()
+    conn.execute(
+        """INSERT INTO loss_patterns (market_question, category, price_range, loss_pct)
+           VALUES (?, ?, ?, ?)""",
+        (question, category, price_range, loss_pct),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_loss_patterns(category: str, price_range: str, limit: int = 20) -> list[dict]:
+    """Fetch recent loss patterns by category + price_range."""
+    conn = get_connection()
+    rows = conn.execute(
+        """SELECT * FROM loss_patterns
+           WHERE category = ? AND price_range = ?
+           ORDER BY created_at DESC LIMIT ?""",
+        (category, price_range, limit),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]

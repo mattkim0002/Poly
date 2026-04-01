@@ -341,9 +341,9 @@ def estimate_crypto_probability(question: str, market_price: float, outcome: str
     bearish = sum(1 for s in signals if s[1] < 0.45)
     agreement = max(bullish, bearish)
 
-    if agreement >= 5:
+    if agreement >= 6:
         confidence = "high"
-    elif agreement >= 3:
+    elif agreement >= 4:
         confidence = "medium"
     else:
         confidence = "low"

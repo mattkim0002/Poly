@@ -19,7 +19,7 @@ from core import database, market_data, trader, analyzer, crypto_predictor
 from strategies import ev as ev_mod, filters, position_sizing
 from strategies.learner import (
     get_edge_adjustment, should_skip_market, get_size_multiplier,
-    print_learning_report, classify_market,
+    print_learning_report, classify_market, record_loss_pattern,
 )
 from strategies.risk import calculate_r_multiple, expectancy, drawdown_multiplier, drawdown
 from utils.logger import log
@@ -394,10 +394,10 @@ def _evaluate_market(market: dict, bankroll: float, peak_equity: float, recent_t
             print(f"  [SKIP] No edge: '{question[:40]}' — {reasoning[:60]}")
             return None
 
-        # For medium confidence, require bigger edge (8% instead of 5%)
+        # For medium confidence, require bigger edge (15%)
         if estimate["confidence"] == "medium":
             yes_edge_check = abs(estimate["probability"] - yes_price)
-            if yes_edge_check < 0.08:
+            if yes_edge_check < 0.15:
                 print(f"  [SKIP] Medium conf, weak edge ({yes_edge_check:.0%}): '{question[:40]}'")
                 return None
 
@@ -620,7 +620,7 @@ def _check_existing_positions(open_trades: list[dict]):
                 trader.place_limit_order(token_id, sell_price, real_size, "SELL")
             continue
 
-        # Stop loss: exit if down 20%
+        # Stop loss: exit if down past threshold
         loss_pct = (avg_price - current_price) / avg_price if avg_price > 0 else 0
         if loss_pct >= config.STOP_LOSS_PCT:
             pnl = (current_price - avg_price) * real_size
@@ -628,6 +628,9 @@ def _check_existing_positions(open_trades: list[dict]):
             database.update_trade_result(trade["id"], current_price, pnl, r_mult, "lost")
             _daily_pnl += pnl
             print(f"  🛑 STOP LOSS: '{question[:40]}' | PnL=${pnl:.2f}")
+
+            # Record the loss pattern for learning
+            record_loss_pattern(question, entry_price=avg_price, exit_price=current_price, loss_pct=loss_pct)
 
             # Cancel pending orders to free balance, then sell
             if not config.DRY_RUN:

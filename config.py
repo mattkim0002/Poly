@@ -21,8 +21,8 @@ CYCLE_INTERVAL_SEC = 30            # 30 seconds — ultra fast for crypto
 MAX_MARKETS_PER_CYCLE = 50        # Scan lots of markets per cycle
 
 # === Market Filters ===
-MIN_VOLUME = 100                  # Low minimum to catch 5-min crypto markets
-MIN_LIQUIDITY = 100               # Low minimum for short-term markets
+MIN_VOLUME = 1000                 # Higher minimum volume — more liquid markets = better pricing
+MIN_LIQUIDITY = 500               # Higher minimum liquidity
 MAX_DAYS_TO_RESOLUTION = 60       # Markets resolving within 60 days
 
 # === Sports Filter — skip these categories ===
@@ -92,14 +92,14 @@ PREFERRED_KEYWORDS = {
 }
 
 # === Edge / EV Thresholds ===
-MIN_EDGE = 0.05                   # 5% minimum edge — only take confident trades
-MIN_EDGE_CRYPTO = 0.01            # 1% minimum edge for crypto — very aggressive
-MIN_EV_PER_DOLLAR = 0.01          # $0.01 minimum EV per dollar risked
+MIN_EDGE = 0.10                   # 10% minimum edge — only take high-conviction trades
+MIN_EDGE_CRYPTO = 0.05            # 5% minimum edge for crypto (was 1% — way too low)
+MIN_EV_PER_DOLLAR = 0.03          # $0.03 minimum EV per dollar risked
 
 # === Position Sizing ===
-KELLY_FRACTION = 0.40             # 40% Kelly — aggressive for crypto
+KELLY_FRACTION = 0.25             # 25% Kelly (true Quarter-Kelly)
 MAX_POSITION_PCT = 0.15           # Max 15% of bankroll per trade
-MAX_OPEN_POSITIONS = 10           # More positions running at once
+MAX_OPEN_POSITIONS = 5            # Fewer, higher-quality positions
 MIN_ORDER_SIZE_USD = 1.0          # Minimum order to place
 
 # === Risk Management (Chan Drawdown) ===
@@ -107,9 +107,9 @@ DD_THRESHOLD_HALF = 0.20          # Halve size at 20% drawdown
 DD_THRESHOLD_STOP = 0.30          # Stop trading at 30% drawdown
 
 # === Stop Loss / Take Profit ===
-STOP_LOSS_PCT = 0.20              # Exit if position down 20%
-TAKE_PROFIT_PCT = 0.15            # Exit if position up 15%
-TAKE_PROFIT_CRYPTO_PCT = 0.05     # Exit crypto 5-min markets at 5% profit
+STOP_LOSS_PCT = 0.0615            # Exit if position down 6.15% — hard stop-loss
+TAKE_PROFIT_PCT = 0.25            # Exit if position up 25% — let winners run
+TAKE_PROFIT_CRYPTO_PCT = 0.10     # Exit crypto 5-min markets at 10% profit
 TAKE_PROFIT_EDGE_MIN = 0.02       # Exit if edge drops below 2%
 
 # === Crypto Short-Term Market Limits ===
@@ -121,7 +121,7 @@ DAILY_LOSS_PER_10 = 2.0           # Max $2 loss per $10 bankroll
 
 # === Rolling Win Rate (Simons) ===
 WIN_RATE_WINDOW = 20              # Last N trades
-WIN_RATE_THRESHOLD = 0.45         # Halve size below this
+WIN_RATE_THRESHOLD = 0.55         # More aggressive cutback below 55% win rate
 MIN_TRADES_FOR_SIGNAL = 5         # Need at least this many trades
 
 # === Correlation Filter (Simons) ===
@@ -130,15 +130,15 @@ CORRELATION_THRESHOLD = 0.60      # Skip if keyword overlap > 60%
 # === Long-Shot Bias (Taleb) ===
 LONGSHOT_LOW = 0.05               # Apply correction above this price
 LONGSHOT_HIGH = 0.20              # Apply correction below this price
-LONGSHOT_CORRECTION = 0.08        # +8% edge correction
+LONGSHOT_CORRECTION = 0.02        # +2% edge correction — much more conservative
 
 # === Claude AI ===
 CLAUDE_MODEL = "claude-sonnet-4-6"
-MAX_CLAUDE_CALLS = 8              # Max Claude API calls per cycle — reduce load
+MAX_CLAUDE_CALLS = 5              # Max Claude API calls per cycle — more selective
 CLAUDE_MAX_TOKENS = 500
 
 # === Order Execution ===
-PRICE_IMPROVEMENT = 0.03          # 3 cents better than midpoint — fills faster
+PRICE_IMPROVEMENT = 0.01          # 1 cent price improvement — preserve edge
 
 # === Database ===
 DB_PATH = "polybot.db"
