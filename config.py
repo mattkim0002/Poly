@@ -92,14 +92,14 @@ PREFERRED_KEYWORDS = {
 }
 
 # === Edge / EV Thresholds ===
-MIN_EDGE = 0.03                    # 3% minimum edge for crypto (real-time data gives reliable edge)
-MIN_EDGE_CRYPTO = 0.03             # Same — all trades are crypto now
-MIN_EV_PER_DOLLAR = 0.01           # $0.01 — crypto edge is real but thin
+MIN_EDGE = 0.08                    # 8% minimum edge — only trade when Polymarket is clearly mispriced
+MIN_EDGE_CRYPTO = 0.08             # Same — need real edge, not coin flips
+MIN_EV_PER_DOLLAR = 0.02           # $0.02 minimum EV per dollar
 
 # === Position Sizing ===
 KELLY_FRACTION = 0.25              # Quarter-Kelly
 MAX_POSITION_PCT = 0.20            # 20% max per trade — we're high confidence
-MAX_OPEN_POSITIONS = 8             # Can have more positions since they resolve in 5 min
+MAX_OPEN_POSITIONS = 3             # Fewer positions — concentrate on best signals only
 MIN_ORDER_SIZE_USD = 1.0
 
 # === Risk Management (Chan Drawdown) ===
@@ -113,12 +113,12 @@ TAKE_PROFIT_CRYPTO_PCT = 0.10      # Same
 TAKE_PROFIT_EDGE_MIN = 0.01        # Exit if edge drops below 1%
 
 # === Crypto Position Limits ===
-CRYPTO_MAX_POSITION_PCT = 0.25     # 25% of bankroll per crypto bet — aggressive but controlled
+CRYPTO_MAX_POSITION_PCT = 0.15     # 15% of bankroll per crypto bet — conservative until proven
 CRYPTO_CHECK_INTERVAL_SEC = 5      # Check positions every 5 seconds — speed matters
 
 # === Real-Time Edge Detection Thresholds ===
-MOMENTUM_THRESHOLD_STRONG = 0.15   # 0.15% move in 60 sec = strong signal
-MOMENTUM_THRESHOLD_MEDIUM = 0.08   # 0.08% move in 60 sec = medium signal
+MOMENTUM_THRESHOLD_STRONG = 0.20   # 0.20% move in 60 sec = strong signal (was 0.15 — too loose)
+MOMENTUM_THRESHOLD_MEDIUM = 0.12   # 0.12% move in 60 sec = medium signal (was 0.08 — too loose)
 MOMENTUM_WINDOW_SECONDS = 60       # Look at last 60 seconds of price action
 VOLUME_SPIKE_THRESHOLD = 2.0       # Volume must be 2x average to confirm move
 

@@ -533,12 +533,13 @@ def estimate_crypto_probability(question: str, market_price: float, outcome: str
     base_prob = max(0.20, min(0.85, base_prob))
 
     # === Confidence level ===
-    if signal_strength == "strong" and boosters >= 2:
+    # Only trade on HIGH confidence — strong momentum + multiple confirmations
+    if signal_strength == "strong" and boosters >= 3:
         confidence = "high"
-    elif (signal_strength == "medium" and boosters >= 1) or signal_strength == "strong":
+    elif signal_strength == "strong" and boosters >= 2:
         confidence = "medium"
     else:
-        log.info("Crypto SKIP '%s' — low confidence (%s signal, %d boosters)",
+        log.info("Crypto SKIP '%s' — not enough confirmation (%s signal, %d boosters)",
                  question[:40], signal_strength, boosters)
         return None
 

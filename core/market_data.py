@@ -101,6 +101,7 @@ def get_active_markets(limit: int = 100) -> list[dict]:
             "token_ids": clob_token_ids,
             "volume": volume,
             "liquidity": liquidity,
+            "end_date": m.get("endDate") or m.get("end_date_iso") or "",
         })
 
     # CRYPTO ONLY: Filter for up/down markets when in crypto-only mode

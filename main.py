@@ -284,6 +284,19 @@ def _evaluate_market(market: dict, bankroll: float, peak_equity: float, recent_t
     if yes_price <= 0.01 or yes_price >= 0.99:
         return None
 
+    # Skip markets resolving in the past or within 2 minutes (too late to trade)
+    end_date = market.get("end_date") or market.get("endDate") or ""
+    if end_date:
+        from datetime import datetime, timezone
+        try:
+            end_dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+            minutes_left = (end_dt - datetime.now(timezone.utc)).total_seconds() / 60
+            if minutes_left < 2:
+                print(f"  [SKIP] Too close to resolution ({minutes_left:.0f}m left): '{question[:40]}'")
+                return None
+        except (ValueError, TypeError):
+            pass
+
     # Only evaluate crypto up/down markets
     if not crypto_predictor.is_crypto_updown_market(question):
         return None
