@@ -25,7 +25,7 @@ MIN_VOLUME = 5                     # Keep low for new markets
 MIN_LIQUIDITY = 50                 # Lower — we check orderbook depth ourselves
 
 # === Arbitrage Settings ===
-MIN_ARB_PROFIT = 0.02              # Minimum 2 cents profit per share (2%)
+MIN_ARB_PROFIT = 0.005             # Minimum 0.5 cents profit per share (0.5%) — catch small gaps
 ARB_MAX_POSITION_PCT = 0.40        # Up to 40% of bankroll per arb (low risk since hedged)
 MAX_DAYS_TO_RESOLUTION = 1         # Only markets resolving within 1 day (5-min, 15-min, 1-hour)
 
