@@ -17,7 +17,7 @@ GAMMA_HOST = "https://gamma-api.polymarket.com"
 CHAIN_ID = 137  # Polygon
 
 # === Trading Cycle ===
-CYCLE_INTERVAL_SEC = 10            # Faster scanning — arb opportunities disappear quickly
+CYCLE_INTERVAL_SEC = 15            # Momentum scanning interval
 MAX_MARKETS_PER_CYCLE = 50         # Keep scanning lots
 
 # === Market Filters ===
@@ -103,7 +103,7 @@ MIN_EV_PER_DOLLAR = 0.02           # $0.02 minimum EV per dollar
 # === Position Sizing ===
 KELLY_FRACTION = 0.25              # Quarter-Kelly
 MAX_POSITION_PCT = 0.20            # 20% max per trade — we're high confidence
-MAX_OPEN_POSITIONS = 10            # More positions OK since they're hedged
+MAX_OPEN_POSITIONS = 3             # Conservative — focus on best signals
 MIN_ORDER_SIZE_USD = 1.0
 
 # === Risk Management (Chan Drawdown) ===
