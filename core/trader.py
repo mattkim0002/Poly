@@ -82,10 +82,37 @@ def get_midpoint(token_id: str) -> float:
 
 
 def get_orderbook(token_id: str) -> dict:
-    """Get full orderbook for a token."""
+    """Get full orderbook for a token as a plain dict."""
     client = get_client()
     try:
-        return client.get_order_book(token_id)
+        book = client.get_order_book(token_id)
+        # OrderBookSummary is an object with .asks and .bids attributes
+        # Each entry has .price and .size attributes
+        def _to_list(levels):
+            if not levels:
+                return []
+            result = []
+            for lvl in levels:
+                try:
+                    result.append({
+                        "price": float(lvl.price),
+                        "size": float(lvl.size),
+                    })
+                except (AttributeError, TypeError):
+                    # Already a dict
+                    try:
+                        result.append({
+                            "price": float(lvl["price"]),
+                            "size": float(lvl["size"]),
+                        })
+                    except Exception:
+                        pass
+            return result
+
+        return {
+            "bids": _to_list(getattr(book, "bids", []) or []),
+            "asks": _to_list(getattr(book, "asks", []) or []),
+        }
     except Exception as e:
         log.error("Failed to get orderbook for %s: %s", token_id, e)
         return {"bids": [], "asks": []}
