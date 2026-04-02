@@ -104,9 +104,8 @@ def get_active_markets(limit: int = 100) -> list[dict]:
             "end_date": m.get("endDate") or m.get("end_date_iso") or "",
         })
 
-    # CRYPTO ONLY: Filter for up/down markets when in crypto-only mode
-    if hasattr(config, 'MAX_CLAUDE_CALLS') and config.MAX_CLAUDE_CALLS == 0:
-        filtered = [m for m in filtered if "up or down" in (m.get("question", "") or "").lower()]
+    # CRYPTO ONLY: Filter for up/down markets — we only trade crypto
+    filtered = [m for m in filtered if "up or down" in (m.get("question", "") or "").lower()]
 
     log.info("Fetched %d markets, %d pass filters", len(markets), len(filtered))
     return filtered

@@ -14,6 +14,7 @@ We buy before the market catches up.
 """
 
 import httpx
+import anthropic
 import config
 from utils.logger import log
 
@@ -373,6 +374,76 @@ def get_open_interest(symbol: str) -> dict | None:
         return None
 
 
+def claude_confirm_trade(
+    question: str,
+    symbol: str,
+    direction: str,
+    price_change_60s: float,
+    price_change_180s: float,
+    volume_ratio: float,
+    buy_pressure: float,
+    is_accelerating: bool,
+    boosters: list[str],
+    market_price: float,
+    our_probability: float,
+    signal_strength: str,
+) -> dict | None:
+    """Ask Claude to confirm or reject a trade based on momentum data.
+    
+    Returns {"approved": bool, "reason": str} or None if Claude unavailable.
+    Claude acts as a final gate — it sees all the raw data and decides
+    whether the signal is real or likely to reverse.
+    """
+    try:
+        client = anthropic.Anthropic()
+        
+        edge = our_probability - market_price
+        boosters_str = ", ".join(boosters) if boosters else "none"
+        
+        prompt = f"""You are a crypto trading analyst. A momentum-based bot detected a signal and wants to trade. Review the data and decide: APPROVE or REJECT.
+
+MARKET: {question}
+SIGNAL: {direction} ({signal_strength})
+PRICE MOVE: {price_change_60s:+.4f}% in 60s, {price_change_180s:+.4f}% in 180s
+VOLUME RATIO: {volume_ratio:.1f}x average
+BUY PRESSURE: {buy_pressure:.0%}
+ACCELERATING: {is_accelerating}
+CONFIRMING SIGNALS: {boosters_str}
+MARKET PRICE: {market_price:.3f} (${market_price:.2f})
+OUR PROBABILITY: {our_probability:.2f}
+EDGE: {edge:.1%}
+
+Rules:
+- REJECT if the move looks like noise (tiny price change, no volume confirmation)
+- REJECT if signals contradict each other (e.g. price up but sell pressure dominates)
+- REJECT if the edge is too thin (<5%) after accounting for spread
+- REJECT if the move has already played out (180s move >> 60s move = momentum fading)
+- APPROVE if multiple signals align and the edge is real
+
+Respond in exactly this format:
+DECISION: APPROVE or REJECT
+REASON: One sentence explaining why"""
+
+        response = client.messages.create(
+            model=config.CLAUDE_MODEL,
+            max_tokens=config.CLAUDE_MAX_TOKENS,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        
+        text = response.content[0].text.strip()
+        
+        # Parse response
+        approved = "APPROVE" in text.upper().split("\n")[0]
+        reason_line = [l for l in text.split("\n") if l.strip().startswith("REASON:")]
+        reason = reason_line[0].replace("REASON:", "").strip() if reason_line else text[:100]
+        
+        return {"approved": approved, "reason": reason}
+        
+    except Exception as e:
+        log.warning("Claude confirmation failed: %s", e)
+        return None
+
+
 def estimate_crypto_probability(question: str, market_price: float, outcome: str) -> dict | None:
     """Estimate probability using real-time momentum from Binance.
 
@@ -579,6 +650,37 @@ def estimate_crypto_probability(question: str, market_price: float, outcome: str
 
     log.info("Crypto MOMENTUM for '%s' (%s): prob=%.2f conf=%s | %s",
              question[:50], outcome, prob, confidence, reasoning)
+
+    # === Claude confirmation gate ===
+    # Ask Claude to review the momentum data and confirm/reject the trade
+    claude_result = claude_confirm_trade(
+        question=question,
+        symbol=symbol,
+        direction="UP" if signal_up else "DOWN",
+        price_change_60s=price_change_60s,
+        price_change_180s=momentum.get("price_change_180s", 0),
+        volume_ratio=momentum.get("volume_ratio", 1.0),
+        buy_pressure=momentum.get("buy_pressure", 0.5),
+        is_accelerating=momentum.get("is_accelerating", False),
+        boosters=booster_details,
+        market_price=market_price,
+        our_probability=prob,
+        signal_strength=signal_strength,
+    )
+
+    if claude_result is None:
+        # Claude unavailable — proceed with data-only signal
+        log.info("Claude unavailable, proceeding with data-only signal")
+    elif not claude_result["approved"]:
+        log.info("CLAUDE REJECTED '%s': %s", question[:40], claude_result["reason"])
+        return None
+    else:
+        # Claude approved — log reasoning and optionally adjust probability
+        log.info("CLAUDE APPROVED '%s': %s", question[:40], claude_result["reason"])
+        reasoning += f" | Claude: {claude_result['reason'][:80]}"
+        # If Claude is very confident, small boost
+        if "strong" in claude_result["reason"].lower() or "clear" in claude_result["reason"].lower():
+            prob = min(0.85, prob + 0.02)
 
     return {
         "probability": prob,

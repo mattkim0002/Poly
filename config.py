@@ -145,9 +145,9 @@ LONGSHOT_HIGH = 0.20               # Apply correction below this price
 LONGSHOT_CORRECTION = 0.0          # DISABLED — not relevant for crypto
 
 # === Claude AI ===
-MAX_CLAUDE_CALLS = 0               # ZERO — no Claude calls, pure data-driven
-CLAUDE_MODEL = "claude-sonnet-4-6" # Keep for potential future use
-CLAUDE_MAX_TOKENS = 500
+MAX_CLAUDE_CALLS = 20              # Claude confirms each trade — fast reasoning on momentum data
+CLAUDE_MODEL = "claude-sonnet-4-6" # Fast + smart
+CLAUDE_MAX_TOKENS = 300            # Short responses only — yes/no + reasoning
 
 # === Order Execution ===
 PRICE_IMPROVEMENT = 0.01           # 1 cent — speed matters but preserve edge
