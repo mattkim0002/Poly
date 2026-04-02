@@ -114,10 +114,13 @@ def _print_portfolio(bankroll: float, open_trades: list[dict], recent_trades: li
 
     if recent_trades:
         wins = sum(1 for t in recent_trades if (t.get("pnl") or 0) > 0)
+        losses = sum(1 for t in recent_trades if (t.get("pnl") or 0) <= 0)
         win_rate = wins / len(recent_trades) if recent_trades else 0
         exp = expectancy(recent_trades)
-        print(f"  Win rate:          {win_rate:<20.1%}")
+        print(f"  Win rate:          {win_rate:.1%} ({wins}W / {losses}L of {len(recent_trades)} trades)")
         print(f"  Expectancy:        {exp:<+20.2f}R")
+    else:
+        print(f"  Win rate:          No trades yet")
 
     print("---------------------------------------")
     print()

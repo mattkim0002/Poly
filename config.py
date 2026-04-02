@@ -117,8 +117,8 @@ CRYPTO_MAX_POSITION_PCT = 0.15     # 15% of bankroll per crypto bet — conserva
 CRYPTO_CHECK_INTERVAL_SEC = 5      # Check positions every 5 seconds — speed matters
 
 # === Real-Time Edge Detection Thresholds ===
-MOMENTUM_THRESHOLD_STRONG = 0.20   # 0.20% move in 60 sec = strong signal (was 0.15 — too loose)
-MOMENTUM_THRESHOLD_MEDIUM = 0.12   # 0.12% move in 60 sec = medium signal (was 0.08 — too loose)
+MOMENTUM_THRESHOLD_STRONG = 0.15   # 0.15% move in 60 sec = strong signal
+MOMENTUM_THRESHOLD_MEDIUM = 0.10   # 0.10% move in 60 sec = medium signal
 MOMENTUM_WINDOW_SECONDS = 60       # Look at last 60 seconds of price action
 VOLUME_SPIKE_THRESHOLD = 2.0       # Volume must be 2x average to confirm move
 
