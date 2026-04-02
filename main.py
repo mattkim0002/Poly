@@ -287,18 +287,36 @@ def _evaluate_market(market: dict, bankroll: float, peak_equity: float, recent_t
     if yes_price <= 0.01 or yes_price >= 0.99:
         return None
 
-    # Skip markets resolving in the past or within 2 minutes (too late to trade)
+    # Skip markets resolving in the past or within 5 minutes (need time for the trade to work)
     end_date = market.get("end_date") or market.get("endDate") or ""
     if end_date:
         from datetime import datetime, timezone
         try:
             end_dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
             minutes_left = (end_dt - datetime.now(timezone.utc)).total_seconds() / 60
-            if minutes_left < 2:
+            if minutes_left < 5:
                 print(f"  [SKIP] Too close to resolution ({minutes_left:.0f}m left): '{question[:40]}'")
                 return None
         except (ValueError, TypeError):
             pass
+
+    # Skip 5-minute markets — only trade 15-min or longer
+    import re
+    time_range = re.search(r'(\d{1,2}):?(\d{2})?(AM|PM)-(\d{1,2}):?(\d{2})?(AM|PM)', question)
+    if time_range:
+        h1, m1, ap1, h2, m2, ap2 = time_range.groups()
+        h1, m1, h2, m2 = int(h1), int(m1 or 0), int(h2), int(m2 or 0)
+        if ap1 == 'PM' and h1 != 12: h1 += 12
+        if ap1 == 'AM' and h1 == 12: h1 = 0
+        if ap2 == 'PM' and h2 != 12: h2 += 12
+        if ap2 == 'AM' and h2 == 12: h2 = 0
+        total1 = h1 * 60 + m1
+        total2 = h2 * 60 + m2
+        if total2 < total1: total2 += 24 * 60
+        duration_min = total2 - total1
+        if duration_min < 15:
+            print(f"  [SKIP] {duration_min}-min market (need 15+): '{question[:40]}'")
+            return None
 
     # Only evaluate crypto up/down markets
     if not crypto_predictor.is_crypto_updown_market(question):
