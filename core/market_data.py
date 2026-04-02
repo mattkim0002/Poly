@@ -52,15 +52,20 @@ def get_active_markets(limit: int = 100) -> list[dict]:
         if liquidity < config.MIN_LIQUIDITY:
             continue
 
-        # Skip markets that resolve too far out (more than MAX_DAYS_TO_RESOLUTION)
+        # Skip markets already expired OR resolving too far out
         end_date = m.get("endDate") or m.get("end_date_iso")
-        if end_date and hasattr(config, "MAX_DAYS_TO_RESOLUTION"):
+        if end_date:
             from datetime import datetime, timezone
             try:
                 end_dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
-                days_out = (end_dt - datetime.now(timezone.utc)).days
-                if days_out > config.MAX_DAYS_TO_RESOLUTION:
+                minutes_left = (end_dt - datetime.now(timezone.utc)).total_seconds() / 60
+                # Skip if already expired (past resolution)
+                if minutes_left < 0:
                     continue
+                # Skip if resolves too far out
+                if hasattr(config, "MAX_DAYS_TO_RESOLUTION"):
+                    if minutes_left > config.MAX_DAYS_TO_RESOLUTION * 1440:
+                        continue
             except (ValueError, TypeError):
                 pass
 

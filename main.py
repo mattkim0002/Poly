@@ -253,7 +253,9 @@ def _find_arbitrage(market: dict, bankroll: float) -> dict | None:
             end_dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
             minutes_left = (end_dt - datetime.now(timezone.utc)).total_seconds() / 60
             if minutes_left < 5:
-                print(f"  [SKIP] Too close to resolution ({minutes_left:.0f}m left): '{question[:40]}'")
+                # Negative = already expired, positive but tiny = resolving now
+                label = "expired" if minutes_left < 0 else f"{minutes_left:.0f}m left"
+                print(f"  [SKIP] {label}: '{question[:40]}'")
                 return None
         except (ValueError, TypeError):
             pass
