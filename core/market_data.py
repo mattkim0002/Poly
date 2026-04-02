@@ -112,6 +112,26 @@ def get_active_markets(limit: int = 100) -> list[dict]:
     # CRYPTO ONLY: Filter for up/down markets — we only trade crypto
     filtered = [m for m in filtered if "up or down" in (m.get("question", "") or "").lower()]
 
+    # Filter out 5-min markets early — only keep 15-min or longer
+    import re
+    def _market_duration_min(question: str) -> int:
+        """Return duration in minutes from title time range. Returns 999 if no range (daily)."""
+        m = re.search(r'(\d{1,2}):?(\d{2})?(AM|PM)-(\d{1,2}):?(\d{2})?(AM|PM)', question)
+        if not m:
+            return 999
+        h1, mi1, ap1, h2, mi2, ap2 = m.groups()
+        h1, mi1, h2, mi2 = int(h1), int(mi1 or 0), int(h2), int(mi2 or 0)
+        if ap1 == 'PM' and h1 != 12: h1 += 12
+        if ap1 == 'AM' and h1 == 12: h1 = 0
+        if ap2 == 'PM' and h2 != 12: h2 += 12
+        if ap2 == 'AM' and h2 == 12: h2 = 0
+        t1 = h1 * 60 + mi1
+        t2 = h2 * 60 + mi2
+        if t2 < t1: t2 += 24 * 60
+        return t2 - t1
+
+    filtered = [m for m in filtered if _market_duration_min(m.get("question", "")) >= 15]
+
     log.info("Fetched %d markets, %d pass filters", len(markets), len(filtered))
     return filtered
 
