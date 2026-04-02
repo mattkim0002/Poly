@@ -17,12 +17,16 @@ GAMMA_HOST = "https://gamma-api.polymarket.com"
 CHAIN_ID = 137  # Polygon
 
 # === Trading Cycle ===
-CYCLE_INTERVAL_SEC = 15            # 15 seconds — need to be fast for crypto sniping
+CYCLE_INTERVAL_SEC = 10            # Faster scanning — arb opportunities disappear quickly
 MAX_MARKETS_PER_CYCLE = 50         # Keep scanning lots
 
 # === Market Filters ===
-MIN_VOLUME = 5                     # Very low — crypto 5-min markets are brand new with little volume
-MIN_LIQUIDITY = 100                # Low — these are short-lived markets
+MIN_VOLUME = 5                     # Keep low for new markets
+MIN_LIQUIDITY = 50                 # Lower — we check orderbook depth ourselves
+
+# === Arbitrage Settings ===
+MIN_ARB_PROFIT = 0.02              # Minimum 2 cents profit per share (2%)
+ARB_MAX_POSITION_PCT = 0.40        # Up to 40% of bankroll per arb (low risk since hedged)
 MAX_DAYS_TO_RESOLUTION = 1         # Only markets resolving within 1 day (5-min, 15-min, 1-hour)
 
 # === Sports Filter — skip these categories ===
@@ -99,7 +103,7 @@ MIN_EV_PER_DOLLAR = 0.02           # $0.02 minimum EV per dollar
 # === Position Sizing ===
 KELLY_FRACTION = 0.25              # Quarter-Kelly
 MAX_POSITION_PCT = 0.20            # 20% max per trade — we're high confidence
-MAX_OPEN_POSITIONS = 3             # Fewer positions — concentrate on best signals only
+MAX_OPEN_POSITIONS = 10            # More positions OK since they're hedged
 MIN_ORDER_SIZE_USD = 1.0
 
 # === Risk Management (Chan Drawdown) ===

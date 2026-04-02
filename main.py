@@ -1,8 +1,8 @@
-"""Polymarket Trading Bot — Crypto Sniper
+"""Polymarket Trading Bot — Arbitrage Mode
 
-Real-time crypto 5-minute market sniper.
-Detects Binance price momentum and trades Polymarket binary markets
-before they reprice. Pure data-driven — no Claude AI calls.
+Scans crypto binary markets for arbitrage opportunities.
+Buys BOTH YES and NO sides when pair_cost < $1.00 for guaranteed profit.
+No directional prediction needed — profit is locked in at execution.
 """
 
 import sys
@@ -16,11 +16,6 @@ sys.stderr.reconfigure(line_buffering=True)
 
 import config
 from core import database, market_data, trader, crypto_predictor
-from strategies import ev as ev_mod, filters, position_sizing
-from strategies.learner import (
-    get_edge_adjustment, should_skip_market, get_size_multiplier,
-    print_learning_report, classify_market,
-)
 from strategies.risk import calculate_r_multiple, expectancy, drawdown_multiplier, drawdown
 from utils.logger import log
 
@@ -40,25 +35,6 @@ def _is_junk_market(question: str) -> bool:
     return False
 
 
-def _has_data_edge(question: str) -> bool:
-    """Only trade crypto up/down markets — we have real-time Binance edge.
-
-    In crypto-only mode (MAX_CLAUDE_CALLS == 0), we ONLY trade markets
-    where we can detect real-time price momentum from exchanges.
-    """
-    q_lower = question.lower()
-
-    # Crypto up/down markets — always have Binance momentum edge
-    crypto_terms = {"bitcoin", "btc", "ethereum", "eth", "solana", "sol",
-                    "xrp", "dogecoin", "doge", "cardano", "crypto",
-                    "up or down"}
-    if any(t in q_lower for t in crypto_terms):
-        return True
-
-    # Everything else — no edge without Claude
-    return False
-
-
 def _daily_loss_limit(bankroll: float) -> float:
     """Max daily loss allowed based on bankroll."""
     return (bankroll / 10.0) * config.DAILY_LOSS_PER_10
@@ -66,18 +42,16 @@ def _daily_loss_limit(bankroll: float) -> float:
 
 def _print_banner(bankroll: float):
     mode = "LIVE TRADING" if not config.DRY_RUN else "DRY RUN"
-    mode_icon = "LIVE TRADING" if not config.DRY_RUN else "DRY RUN"
     print()
     print("======================================================")
-    print("               CRYPTO SNIPER                          ")
-    print(f"  Mode:        {mode_icon:<39}")
+    print("               ARBITRAGE MODE                         ")
+    print(f"  Mode:        {mode:<39}")
     print(f"  Bankroll:    ${bankroll:<39.2f}")
-    print(f"  Min edge:    {config.MIN_EDGE:.0%}{'':<37}")
-    print(f"  Kelly:       {config.KELLY_FRACTION:.0%} (Quarter-Kelly){'':<24}")
-    print(f"  Max position: {config.MAX_POSITION_PCT:.0%} of bankroll{'':<26}")
+    print(f"  Min profit:  ${config.MIN_ARB_PROFIT:.2f}/share{'':<30}")
+    print(f"  Max per arb: {config.ARB_MAX_POSITION_PCT:.0%} of bankroll{'':<26}")
+    print(f"  Max positions:{config.MAX_OPEN_POSITIONS:<32}")
     print(f"  Cycle:       {config.CYCLE_INTERVAL_SEC}s{'':<36}")
-    print(f"  Momentum:    >{config.MOMENTUM_THRESHOLD_MEDIUM}% (med) >{config.MOMENTUM_THRESHOLD_STRONG}% (strong)")
-    print(f"  Claude:      DISABLED (pure data-driven){'':<16}")
+    print(f"  Strategy:    Buy YES+NO when pair < $1.00{'':<15}")
     print("======================================================")
     print()
     if not config.DRY_RUN:
@@ -208,14 +182,8 @@ def run_cycle():
     before_filter = len(markets)
     markets = [m for m in markets if not _is_junk_market(m.get("question", ""))]
     junk_count = before_filter - len(markets)
-
-    # ONLY trade markets where we have a real data edge
-    before_edge = len(markets)
-    markets = [m for m in markets if _has_data_edge(m.get("question", ""))]
-    no_edge_count = before_edge - len(markets)
-
-    if junk_count or no_edge_count:
-        print(f"[INFO] Filtered {junk_count} junk + {no_edge_count} no-edge markets")
+    if junk_count:
+        print(f"[INFO] Filtered {junk_count} junk markets")
 
     # Skip markets we already have positions in
     open_token_ids = {t["token_id"] for t in open_trades}
@@ -224,70 +192,60 @@ def run_cycle():
     # CRYPTO ONLY — only keep crypto up/down markets
     crypto_markets = [m for m in markets if crypto_predictor.is_crypto_updown_market(m.get("question", ""))]
     markets = crypto_markets
-    print(f"[INFO] {len(crypto_markets)} crypto up/down markets to evaluate")
+    print(f"[INFO] {len(crypto_markets)} crypto up/down markets to scan for arbitrage")
 
-    # --- Step 5: Evaluate crypto markets (Binance momentum — no Claude) ---
-    print("[INFO] Step 4: Evaluating crypto markets (Binance momentum)...")
-    candidates = []
+    # --- Step 5: Find arbitrage opportunities ---
+    print("[INFO] Step 4: Scanning orderbooks for arbitrage...")
+    arb_opportunities = []
     for market in crypto_markets:
-        candidate = _evaluate_market(market, bankroll, peak_equity, recent_trades)
-        if candidate:
-            candidates.append(candidate)
-            print(f"  CRYPTO HIT: {candidate['question'][:50]} | Edge: {candidate['edge']:.1%}")
+        arb = _find_arbitrage(market, bankroll)
+        if arb:
+            arb_opportunities.append(arb)
+            print(f"  ARB: {arb['question'][:50]} | YES@{arb['yes_price']:.3f} + NO@{arb['no_price']:.3f} = {arb['pair_cost']:.3f} | Profit: ${arb['total_profit']:.2f}")
 
-    # --- Step 6: Top opportunities ---
-    if not candidates:
-        print("[INFO] No opportunities found with sufficient edge")
+    # --- Step 6: Execute arbitrage trades ---
+    if not arb_opportunities:
+        print("[INFO] No arbitrage opportunities found")
         _record_equity(bankroll, live_pos_value)
         _print_portfolio(bankroll, open_trades, recent_trades)
         return
 
-    print(f"\n[INFO] Step 5: Top opportunities found ({len(candidates)}):")
-    for c in candidates:
-        print(f"  CRYPTO {c['question'][:50]}")
-        print(f"    {c['outcome']} @ {c['market_price']:.2f} | Edge: {c['edge']:.1%} | EV: ${c['ev']:.3f}")
+    # Sort by profit per share descending — best arbs first
+    arb_opportunities.sort(key=lambda a: a["profit_per_share"], reverse=True)
 
-    # --- Step 7: Execute trades ---
-    print("\n[INFO] Step 6: Executing trades...")
+    print(f"\n[INFO] Step 5: Executing {len(arb_opportunities)} arbitrage trade(s)...")
     slots_available = config.MAX_OPEN_POSITIONS - len(open_trades)
     trades_placed = 0
 
-    for candidate in candidates[:slots_available]:
-        placed = _execute_trade(candidate, bankroll, peak_equity, recent_trades, total_equity)
+    for arb in arb_opportunities[:slots_available]:
+        placed = _execute_arbitrage(arb, bankroll)
         if placed:
             trades_placed += 1
+            # Update bankroll for next trade
+            bankroll -= arb["total_cost"]
 
     if trades_placed == 0:
-        print("[INFO] No trades executed this cycle")
+        print("[INFO] No arb trades executed this cycle")
     else:
-        print(f"[INFO] {trades_placed} trade(s) placed")
+        print(f"[INFO] {trades_placed} arb trade(s) placed")
 
-    # --- Step 8: Record & summarize ---
+    # --- Step 7: Record & summarize ---
     _record_equity(bankroll, live_pos_value)
     _print_portfolio(bankroll, open_trades, recent_trades)
 
-    # Print learning report every 5 cycles
-    if _cycle_count % 5 == 0:
-        print_learning_report()
 
+def _find_arbitrage(market: dict, bankroll: float) -> dict | None:
+    """Check if a market has an arbitrage opportunity.
 
-def _evaluate_market(market: dict, bankroll: float, peak_equity: float, recent_trades: list[dict]) -> dict | None:
-    """Evaluate a single market for trading opportunity."""
+    Returns trade details if pair_cost < threshold, None otherwise.
+    """
     question = market["question"]
-    outcomes = market.get("outcomes", ["Yes", "No"])
-    outcome_prices = market.get("outcome_prices", [])
     token_ids = market.get("token_ids", [])
 
-    if not outcome_prices or not token_ids or len(token_ids) < 2:
+    if len(token_ids) < 2:
         return None
 
-    yes_price = outcome_prices[0] if outcome_prices else 0.0
-    no_price = outcome_prices[1] if len(outcome_prices) > 1 else (1.0 - yes_price)
-
-    if yes_price <= 0.01 or yes_price >= 0.99:
-        return None
-
-    # Skip markets resolving in the past or within 5 minutes (need time for the trade to work)
+    # Skip markets resolving in the past or within 5 minutes
     end_date = market.get("end_date") or market.get("endDate") or ""
     if end_date:
         from datetime import datetime, timezone
@@ -318,161 +276,152 @@ def _evaluate_market(market: dict, bankroll: float, peak_equity: float, recent_t
             print(f"  [SKIP] {duration_min}-min market (need 15+): '{question[:40]}'")
             return None
 
-    # Only evaluate crypto up/down markets
-    if not crypto_predictor.is_crypto_updown_market(question):
+    yes_token = token_ids[0]
+    no_token = token_ids[1]
+
+    # Get orderbooks for both sides
+    yes_book = trader.get_orderbook(yes_token)
+    no_book = trader.get_orderbook(no_token)
+
+    # Best ask = cheapest price someone is willing to sell at
+    yes_asks = yes_book.get("asks", [])
+    no_asks = no_book.get("asks", [])
+
+    if not yes_asks or not no_asks:
         return None
 
-    # LEARNING: Skip categories that have been losing money
-    skip, reason = should_skip_market(question)
-    if skip:
-        print(f"  [LEARN] Skipping '{question[:40]}' — {reason}")
+    # asks are sorted by price ascending — first entry is cheapest
+    best_ask_yes = float(yes_asks[0]["price"])
+    best_ask_no = float(no_asks[0]["price"])
+
+    # Available liquidity at best ask
+    yes_liquidity = float(yes_asks[0]["size"])
+    no_liquidity = float(no_asks[0]["size"])
+
+    pair_cost = best_ask_yes + best_ask_no
+
+    # Need pair_cost < (1.0 - MIN_ARB_PROFIT) to be profitable
+    if pair_cost >= (1.0 - config.MIN_ARB_PROFIT):
         return None
 
-    # Use crypto momentum predictor
-    estimate = crypto_predictor.estimate_crypto_probability(
-        question, yes_price, outcomes[0] if outcomes else "Yes"
-    )
-    if not estimate:
-        return None
+    profit_per_share = 1.0 - pair_cost
 
-    claude_prob = estimate["probability"]
+    # Max shares we can buy = min of:
+    # 1. Liquidity available on YES side at best ask
+    # 2. Liquidity available on NO side at best ask
+    # 3. What we can afford (bankroll / pair_cost)
+    # 4. Max position size from config
+    max_from_liquidity = min(yes_liquidity, no_liquidity)
+    max_from_bankroll = bankroll / pair_cost if pair_cost > 0 else 0
+    max_from_config = (bankroll * config.ARB_MAX_POSITION_PCT) / pair_cost
 
-    # Determine which side to trade
-    yes_edge = ev_mod.edge(claude_prob, yes_price)
-    no_edge = ev_mod.edge(1.0 - claude_prob, no_price)
+    shares = min(max_from_liquidity, max_from_bankroll, max_from_config)
+    shares = max(5, int(shares))  # Polymarket minimum is 5 shares
 
-    # Apply long-shot bias correction
-    yes_edge_adj = filters.longshot_bias_correction(yes_price, yes_edge)
-    no_edge_adj = filters.longshot_bias_correction(no_price, no_edge)
+    total_cost = shares * pair_cost
+    total_profit = shares * profit_per_share
 
-    # LEARNING: Adjust edge based on historical category performance
-    edge_adj = get_edge_adjustment(question, yes_price)
-    if edge_adj != 0:
-        cat = classify_market(question)
-        yes_edge_adj += edge_adj
-        no_edge_adj += edge_adj
-        if edge_adj > 0:
-            print(f"  [LEARN] Edge boost +{edge_adj:.2%} for '{cat}' (winning category)")
-        else:
-            print(f"  [LEARN] Edge penalty {edge_adj:.2%} for '{cat}' (losing category)")
-
-    min_edge = config.MIN_EDGE_CRYPTO
-
-    # Pick the better side
-    if yes_edge_adj > no_edge_adj and yes_edge_adj >= min_edge:
-        side = "BUY"
-        outcome = outcomes[0]
-        token_id = token_ids[0]
-        market_price = yes_price
-        true_prob = claude_prob
-        edge_val = yes_edge_adj
-    elif no_edge_adj >= min_edge:
-        side = "BUY"
-        outcome = outcomes[1] if len(outcomes) > 1 else "No"
-        token_id = token_ids[1] if len(token_ids) > 1 else token_ids[0]
-        market_price = no_price
-        true_prob = 1.0 - claude_prob
-        edge_val = no_edge_adj
-    else:
-        return None
-
-    ev_val = ev_mod.expected_value(true_prob, market_price)
-    if ev_val < config.MIN_EV_PER_DOLLAR:
-        return None
-
-    keywords = filters.extract_keywords(question)
-    database.cache_market_keywords(token_id, question, keywords)
+    if total_cost > bankroll * 0.95:  # Leave 5% buffer
+        shares = max(5, int((bankroll * 0.95) / pair_cost))
+        total_cost = shares * pair_cost
+        total_profit = shares * profit_per_share
 
     return {
         "market_id": market["id"],
         "question": question,
-        "token_id": token_id,
-        "side": side,
-        "outcome": outcome,
-        "market_price": market_price,
-        "true_prob": true_prob,
-        "edge": edge_val,
-        "ev": ev_val,
-        "keywords": keywords,
-        "claude_prob": claude_prob,
+        "yes_token": yes_token,
+        "no_token": no_token,
+        "yes_price": best_ask_yes,
+        "no_price": best_ask_no,
+        "pair_cost": pair_cost,
+        "profit_per_share": profit_per_share,
+        "shares": shares,
+        "total_cost": total_cost,
+        "total_profit": total_profit,
+        "yes_liquidity": yes_liquidity,
+        "no_liquidity": no_liquidity,
     }
 
 
-def _execute_trade(candidate: dict, bankroll: float, peak_equity: float, recent_trades: list[dict], total_equity: float = 0.0) -> bool:
-    """Size and execute a trade. Returns True if trade was placed."""
-    sizing = position_sizing.calculate_position(
-        bankroll=bankroll,
-        market_price=candidate["market_price"],
-        true_prob=candidate["true_prob"],
-        peak_equity=peak_equity,
-        recent_trades=recent_trades,
-        current_equity=total_equity if total_equity > 0 else bankroll,
-    )
+def _execute_arbitrage(arb: dict, bankroll: float) -> bool:
+    """Execute an arbitrage trade — buy BOTH sides."""
+    shares = arb["shares"]
 
-    if sizing["position_usd"] <= 0:
-        return False
-
-    price = candidate["market_price"] + config.PRICE_IMPROVEMENT
-    price = max(0.01, min(0.99, round(price, 2)))
-    shares = sizing["shares"]
-
-    # LEARNING: Adjust size based on category performance
-    size_mult = get_size_multiplier(candidate["question"])
-    if size_mult != 1.0:
-        shares = max(5, shares * size_mult)
-        cat = classify_market(candidate["question"])
-        label = "boosted" if size_mult > 1.0 else "reduced"
-        print(f"  [LEARN] Size {label} to {size_mult:.0%} for '{cat}'")
-
-    cost = shares * price
-
-    # Cap crypto 5-min market bets at CRYPTO_MAX_POSITION_PCT of bankroll
-    max_cost = bankroll * config.CRYPTO_MAX_POSITION_PCT
-    if cost > max_cost:
-        shares = max(5, max_cost / price)
-        cost = shares * price
-        print(f"  [CAP] Crypto 5-min bet capped: ${cost:.2f} (max {config.CRYPTO_MAX_POSITION_PCT:.0%} of bankroll)")
-
-    print(f"\n  == PLACING ORDER ===========================")
-    print(f"  Market:  {candidate['question'][:42]}")
-    print(f"  Side:    {candidate['side']} {candidate['outcome']}")
-    print(f"  Price:   ${price:.2f}")
-    print(f"  Shares:  {shares:.1f}")
-    print(f"  Cost:    ${cost:.2f}")
-    print(f"  Edge:    {candidate['edge']:.1%}")
-    print(f"  Kelly:   {sizing['raw_kelly']:.3f}")
+    print(f"\n  == ARBITRAGE TRADE ========================")
+    print(f"  Market:     {arb['question'][:45]}")
+    print(f"  YES price:  ${arb['yes_price']:.3f}")
+    print(f"  NO price:   ${arb['no_price']:.3f}")
+    print(f"  Pair cost:  ${arb['pair_cost']:.3f}")
+    print(f"  Profit/sh:  ${arb['profit_per_share']:.3f}")
+    print(f"  Shares:     {shares}")
+    print(f"  Total cost: ${arb['total_cost']:.2f}")
+    print(f"  Guaranteed: ${arb['total_profit']:.2f} profit")
     print(f"  ============================================")
 
-    order_id = trader.place_limit_order(
-        token_id=candidate["token_id"],
-        price=price,
+    # Place YES buy order
+    yes_order = trader.place_limit_order(
+        token_id=arb["yes_token"],
+        price=arb["yes_price"],
         size=shares,
-        side=candidate["side"],
+        side="BUY",
     )
 
-    if order_id:
-        database.record_trade(
-            market_id=candidate["market_id"],
-            market_question=candidate["question"],
-            token_id=candidate["token_id"],
-            side=candidate["side"],
-            outcome=candidate["outcome"],
-            entry_price=price,
-            size=shares,
-            cost=cost,
-            order_id=order_id,
-            claude_probability=candidate["claude_prob"],
-            market_probability=candidate["market_price"],
-            edge=candidate["edge"],
-            kelly_frac=sizing["raw_kelly"],
-            dd_mult=sizing["dd_multiplier"],
-            signal_mult=sizing["signal_multiplier"],
-        )
-        print(f"  Order placed: {order_id}")
-        return True
-    else:
-        print("  Order failed")
+    if not yes_order:
+        print("  [FAIL] YES order failed")
         return False
+
+    # Place NO buy order
+    no_order = trader.place_limit_order(
+        token_id=arb["no_token"],
+        price=arb["no_price"],
+        size=shares,
+        side="BUY",
+    )
+
+    if not no_order:
+        print("  [WARN] NO order failed — cancelling YES order to avoid one-sided exposure")
+        trader.cancel_order(yes_order)
+        return False
+
+    print(f"  [SUCCESS] Both sides placed: YES={yes_order}, NO={no_order}")
+
+    # Record both legs in database
+    database.record_trade(
+        market_id=arb["market_id"],
+        market_question=arb["question"],
+        token_id=arb["yes_token"],
+        side="BUY",
+        outcome="Yes",
+        entry_price=arb["yes_price"],
+        size=shares,
+        cost=shares * arb["yes_price"],
+        order_id=yes_order,
+        claude_probability=0.0,
+        market_probability=arb["yes_price"],
+        edge=arb["profit_per_share"],
+        kelly_frac=0.0,
+        dd_mult=1.0,
+        signal_mult=1.0,
+    )
+    database.record_trade(
+        market_id=arb["market_id"],
+        market_question=arb["question"] + " [NO SIDE]",
+        token_id=arb["no_token"],
+        side="BUY",
+        outcome="No",
+        entry_price=arb["no_price"],
+        size=shares,
+        cost=shares * arb["no_price"],
+        order_id=no_order,
+        claude_probability=0.0,
+        market_probability=arb["no_price"],
+        edge=arb["profit_per_share"],
+        kelly_frac=0.0,
+        dd_mult=1.0,
+        signal_mult=1.0,
+    )
+
+    return True
 
 
 def _check_existing_positions(open_trades: list[dict]):
@@ -674,7 +623,7 @@ def _sync_polymarket_positions():
 
 
 def main():
-    """Main loop — crypto sniper running every 15 seconds."""
+    """Main loop — arbitrage scanner running every cycle."""
     global _session_start_bankroll
     database.init_db()
 
@@ -694,37 +643,25 @@ def main():
     print(f"[INFO] Peak equity reset to ${total_equity:.2f}")
 
     print(f"[INFO] Bot started | Cycle interval: {config.CYCLE_INTERVAL_SEC}s")
-    print(f"[INFO] Markets: Crypto 5-min Up/Down ONLY")
-    print(f"[INFO] Strategy: Real-time Binance momentum detection")
-    print(f"[INFO] Claude: DISABLED (pure data-driven)")
+    print(f"[INFO] Markets: Crypto Up/Down (binary)")
+    print(f"[INFO] Strategy: Arbitrage — buy YES+NO when pair < $1.00")
+    print(f"[INFO] Min profit: ${config.MIN_ARB_PROFIT:.2f}/share")
     print()
 
     while True:
         try:
             run_cycle()
         except KeyboardInterrupt:
-            print("\n[INFO] Shutting down Crypto Sniper...")
+            print("\n[INFO] Shutting down Arbitrage Bot...")
             break
         except Exception:
             print(f"[ERROR] Cycle failed:\n{traceback.format_exc()}")
 
-        # Between full cycles, do fast checks on crypto positions
         print(f"\n[INFO] Next cycle in {config.CYCLE_INTERVAL_SEC}s...")
-        elapsed = 0
         try:
-            while elapsed < config.CYCLE_INTERVAL_SEC:
-                sleep_time = min(config.CRYPTO_CHECK_INTERVAL_SEC, config.CYCLE_INTERVAL_SEC - elapsed)
-                time.sleep(sleep_time)
-                elapsed += sleep_time
-
-                # Quick check crypto positions for take-profit/stop-loss
-                if elapsed < config.CYCLE_INTERVAL_SEC:
-                    open_trades = database.get_open_trades()
-                    crypto_trades = [t for t in open_trades if crypto_predictor.is_crypto_updown_market(t.get("market_question", ""))]
-                    if crypto_trades:
-                        _check_existing_positions(crypto_trades)
+            time.sleep(config.CYCLE_INTERVAL_SEC)
         except KeyboardInterrupt:
-            print("\n[INFO] Shutting down Crypto Sniper...")
+            print("\n[INFO] Shutting down Arbitrage Bot...")
             break
 
 
