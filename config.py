@@ -11,6 +11,10 @@ POLYMARKET_FUNDER_ADDRESS = os.getenv("POLYMARKET_FUNDER_ADDRESS", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 
+# === Paper Trading ===
+PAPER_TRADING = True               # Set to False for live trading
+PAPER_STARTING_BALANCE = 100.0     # Simulated starting balance
+
 # === Polymarket ===
 CLOB_HOST = "https://clob.polymarket.com"
 GAMMA_HOST = "https://gamma-api.polymarket.com"
