@@ -11,19 +11,27 @@ POLYMARKET_FUNDER_ADDRESS = os.getenv("POLYMARKET_FUNDER_ADDRESS", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 
+# === Paper Trading ===
+PAPER_TRADING = os.getenv("PAPER_TRADING", "true").lower() == "true"  # Default ON — set to false for live
+PAPER_STARTING_BALANCE = float(os.getenv("PAPER_STARTING_BALANCE", "100.0"))
+
 # === Polymarket ===
 CLOB_HOST = "https://clob.polymarket.com"
 GAMMA_HOST = "https://gamma-api.polymarket.com"
 CHAIN_ID = 137  # Polygon
 
 # === Trading Cycle ===
-CYCLE_INTERVAL_SEC = 30            # 30 seconds — ultra fast for crypto
-MAX_MARKETS_PER_CYCLE = 50        # Scan lots of markets per cycle
+CYCLE_INTERVAL_SEC = 15            # Momentum scanning interval
+MAX_MARKETS_PER_CYCLE = 50         # Keep scanning lots
 
 # === Market Filters ===
-MIN_VOLUME = 100                  # Low minimum to catch 5-min crypto markets
-MIN_LIQUIDITY = 100               # Low minimum for short-term markets
-MAX_DAYS_TO_RESOLUTION = 60       # Markets resolving within 60 days
+MIN_VOLUME = 5                     # Keep low for new markets
+MIN_LIQUIDITY = 50                 # Lower — we check orderbook depth ourselves
+
+# === Arbitrage Settings ===
+MIN_ARB_PROFIT = 0.005             # Minimum 0.5 cents profit per share (0.5%) — catch small gaps
+ARB_MAX_POSITION_PCT = 0.40        # Up to 40% of bankroll per arb (low risk since hedged)
+MAX_DAYS_TO_RESOLUTION = 1         # Only markets resolving within 1 day (5-min, 15-min, 1-hour)
 
 # === Sports Filter — skip these categories ===
 SPORTS_KEYWORDS = {
@@ -92,53 +100,66 @@ PREFERRED_KEYWORDS = {
 }
 
 # === Edge / EV Thresholds ===
-MIN_EDGE = 0.05                   # 5% minimum edge — only take confident trades
-MIN_EDGE_CRYPTO = 0.01            # 1% minimum edge for crypto — very aggressive
-MIN_EV_PER_DOLLAR = 0.01          # $0.01 minimum EV per dollar risked
+MIN_EDGE = 0.08                    # 8% minimum edge — only trade when Polymarket is clearly mispriced
+MIN_EDGE_CRYPTO = 0.08             # Same — need real edge, not coin flips
+MIN_EV_PER_DOLLAR = 0.02           # $0.02 minimum EV per dollar
 
 # === Position Sizing ===
-KELLY_FRACTION = 0.40             # 40% Kelly — aggressive for crypto
-MAX_POSITION_PCT = 0.15           # Max 15% of bankroll per trade
-MAX_OPEN_POSITIONS = 10           # More positions running at once
-MIN_ORDER_SIZE_USD = 1.0          # Minimum order to place
+KELLY_FRACTION = 0.25              # Quarter-Kelly
+MAX_POSITION_PCT = 0.20            # 20% max per trade — we're high confidence
+MAX_OPEN_POSITIONS = 2             # Only 2 positions at a time (was 3)
+MIN_ORDER_SIZE_USD = 1.0
 
 # === Risk Management (Chan Drawdown) ===
-DD_THRESHOLD_HALF = 0.20          # Halve size at 20% drawdown
-DD_THRESHOLD_STOP = 0.30          # Stop trading at 30% drawdown
+DD_THRESHOLD_HALF = 0.20           # Halve size at 20% drawdown
+DD_THRESHOLD_STOP = 0.30           # Stop trading at 30% drawdown
 
 # === Stop Loss / Take Profit ===
-STOP_LOSS_PCT = 0.20              # Exit if position down 20%
-TAKE_PROFIT_PCT = 0.15            # Exit if position up 15%
-TAKE_PROFIT_CRYPTO_PCT = 0.05     # Exit crypto 5-min markets at 5% profit
-TAKE_PROFIT_EDGE_MIN = 0.02       # Exit if edge drops below 2%
+STOP_LOSS_PCT = 0.0615             # 6.15% stop loss (user requirement)
+TAKE_PROFIT_PCT = 0.10             # 10% take profit for all crypto
+TAKE_PROFIT_CRYPTO_PCT = 0.10      # Same
+TAKE_PROFIT_EDGE_MIN = 0.01        # Exit if edge drops below 1%
 
-# === Crypto Short-Term Market Limits ===
-CRYPTO_MAX_POSITION_PCT = 0.20    # Max 20% of bankroll on a single crypto bet — aggressive
-CRYPTO_CHECK_INTERVAL_SEC = 10    # Check crypto positions every 10 seconds
+# === Crypto Position Limits ===
+CRYPTO_MAX_POSITION_PCT = 0.15     # 15% of bankroll per crypto bet — conservative until proven
+CRYPTO_CHECK_INTERVAL_SEC = 5      # Check positions every 5 seconds — speed matters
+
+# === Real-Time Edge Detection Thresholds ===
+MOMENTUM_THRESHOLD_STRONG = 0.15   # 0.15% move in 60 sec = strong signal
+MOMENTUM_THRESHOLD_MEDIUM = 0.10   # 0.10% move in 60 sec = medium signal
+MOMENTUM_WINDOW_SECONDS = 60       # Look at last 60 seconds of price action
+VOLUME_SPIKE_THRESHOLD = 2.0       # Volume must be 2x average to confirm move
+
+# === Order Book / Whale Detection Thresholds ===
+ORDERBOOK_IMBALANCE_THRESHOLD = 0.60  # 60% bid ratio = bullish imbalance
+LARGE_TRADE_MULTIPLIER = 5            # Trade > 5x median = "large"
+WHALE_NET_THRESHOLD = 2               # Net 2+ large buys = whale signal
+FUNDING_EXTREME_THRESHOLD = 0.0005    # 0.05% funding rate = extreme
 
 # === Daily Loss Limit ===
-DAILY_LOSS_PER_10 = 2.0           # Max $2 loss per $10 bankroll
+DAILY_LOSS_PER_10 = 2.0            # Max $2 loss per $10 bankroll
+DAILY_LOSS_LIMIT_PCT = 0.10        # 10% daily loss = stop trading for the day
 
 # === Rolling Win Rate (Simons) ===
-WIN_RATE_WINDOW = 20              # Last N trades
-WIN_RATE_THRESHOLD = 0.45         # Halve size below this
-MIN_TRADES_FOR_SIGNAL = 5         # Need at least this many trades
+WIN_RATE_WINDOW = 30               # Last 30 trades (more data since we trade often)
+WIN_RATE_THRESHOLD = 0.55          # Halve size below 55%
+MIN_TRADES_FOR_SIGNAL = 10         # Need 10 trades before adjusting
 
 # === Correlation Filter (Simons) ===
-CORRELATION_THRESHOLD = 0.60      # Skip if keyword overlap > 60%
+CORRELATION_THRESHOLD = 0.60       # Skip if keyword overlap > 60%
 
 # === Long-Shot Bias (Taleb) ===
-LONGSHOT_LOW = 0.05               # Apply correction above this price
-LONGSHOT_HIGH = 0.20              # Apply correction below this price
-LONGSHOT_CORRECTION = 0.08        # +8% edge correction
+LONGSHOT_LOW = 0.05                # Apply correction above this price
+LONGSHOT_HIGH = 0.20               # Apply correction below this price
+LONGSHOT_CORRECTION = 0.0          # DISABLED — not relevant for crypto
 
 # === Claude AI ===
-CLAUDE_MODEL = "claude-sonnet-4-6"
-MAX_CLAUDE_CALLS = 8              # Max Claude API calls per cycle — reduce load
-CLAUDE_MAX_TOKENS = 500
+MAX_CLAUDE_CALLS = 20              # Claude confirms each trade — fast reasoning on momentum data
+CLAUDE_MODEL = "claude-sonnet-4-6" # Fast + smart
+CLAUDE_MAX_TOKENS = 300            # Short responses only — yes/no + reasoning
 
 # === Order Execution ===
-PRICE_IMPROVEMENT = 0.03          # 3 cents better than midpoint — fills faster
+PRICE_IMPROVEMENT = 0.01           # 1 cent — speed matters but preserve edge
 
 # === Database ===
 DB_PATH = "polybot.db"
