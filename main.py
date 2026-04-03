@@ -291,6 +291,16 @@ def run_cycle():
 
     print(f"[INFO] Cash: ${bankroll:.2f} | Positions: ${live_pos_value:.2f} | Total: ${total_equity:.2f} | Peak: ${peak_equity:.2f} | Open: {len(live_positions or [])}")
 
+    # Daily loss limit — hard stop at 10% of bankroll
+    daily_loss = _session_start_bankroll - total_equity  # How much we've lost today
+    daily_loss_limit = bankroll * config.DAILY_LOSS_LIMIT_PCT  # Hard stop at 10% daily loss
+    if daily_loss > daily_loss_limit:
+        print(f"  [HALT] Daily loss limit hit (${daily_loss:.2f} > ${daily_loss_limit:.2f}) — no new trades today")
+        _check_existing_positions(database.get_open_trades())
+        _record_equity(bankroll, live_pos_value)
+        _print_portfolio(bankroll, database.get_open_trades(), recent_trades)
+        return  # Skip Steps 3-6, only monitor existing positions
+
     # --- Step 2: Check exit conditions ---
     print("[INFO] Step 2: Checking exit conditions...")
 

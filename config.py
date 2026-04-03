@@ -103,7 +103,7 @@ MIN_EV_PER_DOLLAR = 0.02           # $0.02 minimum EV per dollar
 # === Position Sizing ===
 KELLY_FRACTION = 0.25              # Quarter-Kelly
 MAX_POSITION_PCT = 0.20            # 20% max per trade — we're high confidence
-MAX_OPEN_POSITIONS = 3             # Conservative — focus on best signals
+MAX_OPEN_POSITIONS = 2             # Only 2 positions at a time (was 3)
 MIN_ORDER_SIZE_USD = 1.0
 
 # === Risk Management (Chan Drawdown) ===
@@ -134,6 +134,7 @@ FUNDING_EXTREME_THRESHOLD = 0.0005    # 0.05% funding rate = extreme
 
 # === Daily Loss Limit ===
 DAILY_LOSS_PER_10 = 2.0            # Max $2 loss per $10 bankroll
+DAILY_LOSS_LIMIT_PCT = 0.10        # 10% daily loss = stop trading for the day
 
 # === Rolling Win Rate (Simons) ===
 WIN_RATE_WINDOW = 30               # Last 30 trades (more data since we trade often)

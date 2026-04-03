@@ -669,8 +669,9 @@ def estimate_crypto_probability(question: str, market_price: float, outcome: str
     )
 
     if claude_result is None:
-        # Claude unavailable — proceed with data-only signal
-        log.info("Claude unavailable, proceeding with data-only signal")
+        # Claude unavailable — BLOCK the trade for safety
+        log.warning("Claude unavailable — blocking trade for safety")
+        return None
     elif not claude_result["approved"]:
         log.info("CLAUDE REJECTED '%s': %s", question[:40], claude_result["reason"])
         return None
