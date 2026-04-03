@@ -5,7 +5,6 @@ import os
 import time
 from datetime import datetime, timezone
 
-import config
 from utils.logger import log
 
 PAPER_DB_FILE = "paper_trades.json"
@@ -16,9 +15,10 @@ def load_paper_state() -> dict:
     if os.path.exists(PAPER_DB_FILE):
         with open(PAPER_DB_FILE) as f:
             return json.load(f)
+    from config import PAPER_STARTING_BALANCE
     return {
-        "balance": config.PAPER_STARTING_BALANCE,
-        "peak_balance": config.PAPER_STARTING_BALANCE,
+        "balance": PAPER_STARTING_BALANCE,
+        "peak_balance": PAPER_STARTING_BALANCE,
         "trades": [],
         "open_positions": [],
         "total_trades": 0,
@@ -69,6 +69,8 @@ def paper_buy(market_id: str, question: str, token_id: str, outcome: str,
 
 def paper_check_positions(get_price_fn) -> list:
     """Check open positions for resolution. Returns list of resolved positions."""
+    from config import TAKE_PROFIT_PCT, STOP_LOSS_PCT
+
     state = load_paper_state()
     resolved = []
     still_open = []
@@ -80,7 +82,6 @@ def paper_check_positions(get_price_fn) -> list:
             still_open.append(pos)
             continue
 
-        # Check if resolved
         if current_price is None or current_price <= 0:
             still_open.append(pos)
             continue
@@ -88,10 +89,9 @@ def paper_check_positions(get_price_fn) -> list:
         won = current_price >= 0.95   # Resolved YES
         lost = current_price <= 0.05  # Resolved NO
 
-        # Take profit / stop loss
         pnl_pct = (current_price - pos["entry_price"]) / pos["entry_price"] if pos["entry_price"] > 0 else 0
-        take_profit = pnl_pct >= 0.10    # 10% gain
-        stop_loss = pnl_pct <= -0.0615   # 6.15% loss
+        take_profit = pnl_pct >= TAKE_PROFIT_PCT
+        stop_loss = pnl_pct <= -STOP_LOSS_PCT
 
         if won or lost or take_profit or stop_loss:
             if won:
@@ -104,11 +104,11 @@ def paper_check_positions(get_price_fn) -> list:
                 reason = "LOST"
             elif take_profit:
                 exit_price = current_price
-                pnl = (current_price - pos["entry_price"]) * pos["size"]
+                pnl = (exit_price - pos["entry_price"]) * pos["size"]
                 reason = f"TAKE_PROFIT ({pnl_pct:+.1%})"
             else:
                 exit_price = current_price
-                pnl = (current_price - pos["entry_price"]) * pos["size"]
+                pnl = (exit_price - pos["entry_price"]) * pos["size"]
                 reason = f"STOP_LOSS ({pnl_pct:+.1%})"
 
             proceeds = exit_price * pos["size"]

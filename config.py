@@ -12,8 +12,8 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 
 # === Paper Trading ===
-PAPER_TRADING = True               # Set to False for live trading
-PAPER_STARTING_BALANCE = 100.0     # Simulated starting balance
+PAPER_TRADING = os.getenv("PAPER_TRADING", "true").lower() == "true"  # Default ON — set to false for live
+PAPER_STARTING_BALANCE = float(os.getenv("PAPER_STARTING_BALANCE", "100.0"))
 
 # === Polymarket ===
 CLOB_HOST = "https://clob.polymarket.com"

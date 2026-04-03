@@ -76,9 +76,9 @@ def _print_portfolio(bankroll: float, open_trades: list[dict], recent_trades: li
 
     if config.PAPER_TRADING:
         from core import paper_trader
-        # Show real account balance for reference
-        print(f"\n  [REAL ACCOUNT] Cash: ${bankroll:.2f} (reference only)")
         print(paper_trader.paper_portfolio_summary())
+        print(f"  (Real account balance: ${bankroll:.2f})")
+        print()
         return
 
     # Fetch LIVE position values from Polymarket
@@ -208,7 +208,7 @@ def _execute_trade(trade: dict, bankroll: float) -> bool:
     edge = trade["edge"]
     probability = trade["probability"]
 
-    # Use paper balance for sizing when in paper mode
+    # In paper mode, use paper balance for sizing
     if config.PAPER_TRADING:
         from core import paper_trader
         bankroll = paper_trader.paper_get_balance()
@@ -256,7 +256,7 @@ def _execute_trade(trade: dict, bankroll: float) -> bool:
         )
         return success
 
-    # Place BUY limit order
+    # Place BUY limit order (live trading only)
     order_id = trader.place_limit_order(
         token_id=trade["token_id"],
         price=price,
@@ -309,135 +309,108 @@ def run_cycle():
     # --- Step 1: Get account state ---
     print("[INFO] Step 1: Checking account state...")
     bankroll = trader.get_balance()
-    if bankroll <= 0 and not config.PAPER_TRADING:
-        print("[WARN] Zero balance — account may be empty or unreadable. Skipping cycle.")
-        return
 
-    peak_equity = database.get_peak_equity()
-    if peak_equity <= 0:
-        peak_equity = bankroll
-
-    recent_trades = database.get_recent_trades(config.WIN_RATE_WINDOW)
-    open_trades = database.get_open_trades()
-
-    # Paper trading: use paper state for balance and positions
     if config.PAPER_TRADING:
         from core import paper_trader
         paper_balance = paper_trader.paper_get_balance()
         paper_positions = paper_trader.paper_get_open_positions()
         paper_pos_value = sum(p["entry_price"] * p["size"] for p in paper_positions)
-        paper_equity = paper_balance + paper_pos_value
+        total_equity = paper_balance + paper_pos_value
+        live_pos_value = 0.0
 
-        print(f"[PAPER] Cash: ${paper_balance:.2f} | Positions: ${paper_pos_value:.2f} | "
-              f"Total: ${paper_equity:.2f} | Open: {len(paper_positions)}")
-        print(f"[INFO] Real account (ref): ${bankroll:.2f}")
+        print(f"[PAPER] Balance: ${paper_balance:.2f} | Open: {len(paper_positions)} | Total: ${total_equity:.2f} | (Real: ${bankroll:.2f})")
 
-        # Check paper positions for exits
+        # Check paper positions for exit conditions
+        _check_existing_positions([])
+
+        # Paper drawdown check
+        state = paper_trader.load_paper_state()
+        peak = state["peak_balance"]
+        if peak > 0 and total_equity < peak:
+            dd_pct = (peak - total_equity) / peak
+            if dd_pct >= config.DD_THRESHOLD_STOP:
+                print(f"[PAPER] DRAWDOWN HALT: {dd_pct:.1%} exceeds {config.DD_THRESHOLD_STOP:.0%}")
+                _print_portfolio(bankroll, [], [])
+                return
+
+        # Paper position limit check
+        if len(paper_positions) >= config.MAX_OPEN_POSITIONS:
+            print(f"[PAPER] Max positions ({config.MAX_OPEN_POSITIONS}) reached, monitoring only")
+            _print_portfolio(bankroll, [], [])
+            return
+
+        # Use paper balance for trade sizing
+        effective_bankroll = paper_balance
+        open_token_ids = {p["token_id"] for p in paper_positions}
+        recent_trades = []
+        open_trades = []
+    else:
+        if bankroll <= 0:
+            print("[WARN] Zero balance — account may be empty or unreadable. Skipping cycle.")
+            return
+
+        peak_equity = database.get_peak_equity()
+        if peak_equity <= 0:
+            peak_equity = bankroll
+
+        recent_trades = database.get_recent_trades(config.WIN_RATE_WINDOW)
+        open_trades = database.get_open_trades()
+
+        # Fetch LIVE position values from Polymarket (not stale DB cost basis)
+        live_positions = trader.get_positions()
+        live_pos_value = sum(float(p.get("currentValue", 0)) for p in (live_positions or []) if float(p.get("size", 0)) > 0)
+        total_equity = bankroll + live_pos_value
+
+        print(f"[INFO] Cash: ${bankroll:.2f} | Positions: ${live_pos_value:.2f} | Total: ${total_equity:.2f} | Peak: ${peak_equity:.2f} | Open: {len(live_positions or [])}")
+
+        # Daily loss limit — hard stop at 10% of bankroll
+        daily_loss = _session_start_bankroll - total_equity  # How much we've lost today
+        daily_loss_limit = bankroll * config.DAILY_LOSS_LIMIT_PCT  # Hard stop at 10% daily loss
+        if daily_loss > daily_loss_limit:
+            print(f"  [HALT] Daily loss limit hit (${daily_loss:.2f} > ${daily_loss_limit:.2f}) — no new trades today")
+            _check_existing_positions(database.get_open_trades())
+            _record_equity(bankroll, live_pos_value)
+            _print_portfolio(bankroll, database.get_open_trades(), recent_trades)
+            return  # Skip Steps 3-6, only monitor existing positions
+
+        # --- Step 2: Check exit conditions ---
+        print("[INFO] Step 2: Checking exit conditions...")
+
+        # Drawdown check — use total equity (cash + positions), not just cash
+        dd_mult = drawdown_multiplier(total_equity, peak_equity)
+        dd_pct = drawdown(total_equity, peak_equity)
+
+        # Always check existing positions for stop loss / take profit
         _check_existing_positions(open_trades)
 
-        # Scan markets — same logic as live
-        print("[INFO] Step 3: Scanning crypto markets...")
-        markets = market_data.get_active_markets(limit=config.MAX_MARKETS_PER_CYCLE)
-        if not markets:
-            print("[INFO] No markets pass filters")
+        if dd_mult == 0.0:
+            print(f"[STOP] DRAWDOWN HALT: {dd_pct:.1%} drawdown exceeds {config.DD_THRESHOLD_STOP:.0%} limit")
+            print(f"[INFO] Monitoring positions only — no new orders")
+            _record_equity(bankroll, live_pos_value)
             _print_portfolio(bankroll, open_trades, recent_trades)
             return
 
-        before_filter = len(markets)
-        markets = [m for m in markets if not _is_junk_market(m.get("question", ""))]
-        junk_count = before_filter - len(markets)
-        if junk_count:
-            print(f"[INFO] Filtered {junk_count} junk markets")
+        if dd_mult < 1.0:
+            print(f"[WARN] Drawdown at {dd_pct:.1%} — position sizes halved")
 
-        # Skip markets we already have paper positions in
-        paper_token_ids = {p["token_id"] for p in paper_positions}
+        # Daily loss limit
+        daily_limit = _daily_loss_limit(total_equity)
+        if _daily_pnl <= -daily_limit:
+            print(f"[STOP] DAILY LOSS LIMIT: ${_daily_pnl:.2f} exceeds -${daily_limit:.2f}")
+            _record_equity(bankroll, live_pos_value)
+            _print_portfolio(bankroll, open_trades, recent_trades)
+            return
+
+        effective_bankroll = bankroll
         open_token_ids = {t["token_id"] for t in open_trades}
-        all_token_ids = paper_token_ids | open_token_ids
-        markets = [m for m in markets if not any(tid in all_token_ids for tid in m.get("token_ids", []))]
-
-        crypto_markets = [m for m in markets if crypto_predictor.is_crypto_updown_market(m.get("question", ""))]
-        print(f"[INFO] {len(crypto_markets)} crypto up/down markets to evaluate")
-
-        # Position limit check using paper positions
-        if len(paper_positions) >= config.MAX_OPEN_POSITIONS:
-            print(f"[INFO] Max positions ({config.MAX_OPEN_POSITIONS}) reached, monitoring only")
-            _print_portfolio(bankroll, open_trades, recent_trades)
-            return
-
-        # Evaluate and execute — same as live path below
-        print("[INFO] Step 4: Evaluating momentum signals...")
-        opportunities = []
-        for market in crypto_markets:
-            trade = _evaluate_market(market, bankroll)
-            if trade:
-                opportunities.append(trade)
-                print(f"  SIGNAL: {trade['question'][:50]} | {trade['outcome']} @ {trade['price']:.3f} | Edge: {trade['edge']:.1%}")
-
-        if not opportunities:
-            print("[INFO] No momentum signals found")
-            _print_portfolio(bankroll, open_trades, recent_trades)
-            return
-
-        opportunities.sort(key=lambda t: t["edge"], reverse=True)
-        best = opportunities[0]
-        print(f"\n[INFO] Step 5: Executing best trade (edge: {best['edge']:.1%})...")
-        _execute_trade(best, bankroll)
-        _print_portfolio(bankroll, open_trades, recent_trades)
-        return
-
-    # --- Live trading path below ---
-
-    # Fetch LIVE position values from Polymarket (not stale DB cost basis)
-    live_positions = trader.get_positions()
-    live_pos_value = sum(float(p.get("currentValue", 0)) for p in (live_positions or []) if float(p.get("size", 0)) > 0)
-    total_equity = bankroll + live_pos_value
-
-    print(f"[INFO] Cash: ${bankroll:.2f} | Positions: ${live_pos_value:.2f} | Total: ${total_equity:.2f} | Peak: ${peak_equity:.2f} | Open: {len(live_positions or [])}")
-
-    # Daily loss limit — hard stop at 10% of bankroll
-    daily_loss = _session_start_bankroll - total_equity  # How much we've lost today
-    daily_loss_limit = bankroll * config.DAILY_LOSS_LIMIT_PCT  # Hard stop at 10% daily loss
-    if daily_loss > daily_loss_limit:
-        print(f"  [HALT] Daily loss limit hit (${daily_loss:.2f} > ${daily_loss_limit:.2f}) — no new trades today")
-        _check_existing_positions(database.get_open_trades())
-        _record_equity(bankroll, live_pos_value)
-        _print_portfolio(bankroll, database.get_open_trades(), recent_trades)
-        return  # Skip Steps 3-6, only monitor existing positions
-
-    # --- Step 2: Check exit conditions ---
-    print("[INFO] Step 2: Checking exit conditions...")
-
-    # Drawdown check — use total equity (cash + positions), not just cash
-    dd_mult = drawdown_multiplier(total_equity, peak_equity)
-    dd_pct = drawdown(total_equity, peak_equity)
-
-    # Always check existing positions for stop loss / take profit
-    _check_existing_positions(open_trades)
-
-    if dd_mult == 0.0:
-        print(f"[STOP] DRAWDOWN HALT: {dd_pct:.1%} drawdown exceeds {config.DD_THRESHOLD_STOP:.0%} limit")
-        print(f"[INFO] Monitoring positions only — no new orders")
-        _record_equity(bankroll, live_pos_value)
-        _print_portfolio(bankroll, open_trades, recent_trades)
-        return
-
-    if dd_mult < 1.0:
-        print(f"[WARN] Drawdown at {dd_pct:.1%} — position sizes halved")
-
-    # Daily loss limit
-    daily_limit = _daily_loss_limit(total_equity)
-    if _daily_pnl <= -daily_limit:
-        print(f"[STOP] DAILY LOSS LIMIT: ${_daily_pnl:.2f} exceeds -${daily_limit:.2f}")
-        _record_equity(bankroll, live_pos_value)
-        _print_portfolio(bankroll, open_trades, recent_trades)
-        return
 
     # --- Step 3: Scan crypto markets ---
     print("[INFO] Step 3: Scanning crypto markets...")
     markets = market_data.get_active_markets(limit=config.MAX_MARKETS_PER_CYCLE)
     if not markets:
         print("[INFO] No markets pass filters")
-        _record_equity(bankroll, live_pos_value)
+        if not config.PAPER_TRADING:
+            _record_equity(bankroll, live_pos_value)
         _print_portfolio(bankroll, open_trades, recent_trades)
         return
 
@@ -449,7 +422,6 @@ def run_cycle():
         print(f"[INFO] Filtered {junk_count} junk markets")
 
     # Skip markets we already have positions in
-    open_token_ids = {t["token_id"] for t in open_trades}
     markets = [m for m in markets if not any(tid in open_token_ids for tid in m.get("token_ids", []))]
 
     # CRYPTO ONLY — only keep crypto up/down markets
@@ -457,7 +429,7 @@ def run_cycle():
     print(f"[INFO] {len(crypto_markets)} crypto up/down markets to evaluate")
 
     # --- Step 4: Check position limit ---
-    if len(open_trades) >= config.MAX_OPEN_POSITIONS:
+    if not config.PAPER_TRADING and len(open_trades) >= config.MAX_OPEN_POSITIONS:
         print(f"[INFO] Max positions ({config.MAX_OPEN_POSITIONS}) reached, monitoring only")
         _record_equity(bankroll, live_pos_value)
         _print_portfolio(bankroll, open_trades, recent_trades)
@@ -467,7 +439,7 @@ def run_cycle():
     print("[INFO] Step 4: Evaluating momentum signals...")
     opportunities = []
     for market in crypto_markets:
-        trade = _evaluate_market(market, bankroll)
+        trade = _evaluate_market(market, effective_bankroll)
         if trade:
             opportunities.append(trade)
             print(f"  SIGNAL: {trade['question'][:50]} | {trade['outcome']} @ {trade['price']:.3f} | Edge: {trade['edge']:.1%}")
@@ -475,7 +447,8 @@ def run_cycle():
     # --- Step 6: Execute best opportunity (highest edge) ---
     if not opportunities:
         print("[INFO] No momentum signals found")
-        _record_equity(bankroll, live_pos_value)
+        if not config.PAPER_TRADING:
+            _record_equity(bankroll, live_pos_value)
         _print_portfolio(bankroll, open_trades, recent_trades)
         return
 
@@ -484,10 +457,11 @@ def run_cycle():
     best = opportunities[0]
 
     print(f"\n[INFO] Step 5: Executing best trade (edge: {best['edge']:.1%})...")
-    _execute_trade(best, bankroll)
+    _execute_trade(best, effective_bankroll)
 
     # --- Step 7: Record & summarize ---
-    _record_equity(bankroll, live_pos_value)
+    if not config.PAPER_TRADING:
+        _record_equity(bankroll, live_pos_value)
     _print_portfolio(bankroll, open_trades, recent_trades)
 
 
@@ -701,25 +675,13 @@ def main():
 
     if config.PAPER_TRADING:
         from core import paper_trader
-
-        print("\n" + "=" * 50)
-        print("  *** PAPER TRADING MODE — NO REAL MONEY ***")
-        print("=" * 50 + "\n")
-
-        # Still get real balance for reference display
-        bankroll = trader.get_balance()
-        print(f"[INFO] Real account balance (reference): ${bankroll:.2f}")
-
         paper_balance = paper_trader.paper_get_balance()
         _session_start_bankroll = paper_balance
-        print(f"[PAPER] Paper balance: ${paper_balance:.2f}")
+        # Still fetch real balance for reference display
+        bankroll = trader.get_balance()
+        print(f"[INFO] Real account balance: ${bankroll:.2f} (reference only)")
+        print(f"[INFO] Paper balance: ${paper_balance:.2f}")
         _print_banner(paper_balance)
-
-        print(f"[INFO] Bot started | Cycle interval: {config.CYCLE_INTERVAL_SEC}s")
-        print(f"[INFO] Markets: Crypto Up/Down (binary)")
-        print(f"[INFO] Strategy: Momentum + Claude confirmation")
-        print(f"[INFO] Kelly: {config.KELLY_FRACTION:.0%} | Max position: {config.CRYPTO_MAX_POSITION_PCT:.0%} | Min edge: {config.MIN_EDGE_CRYPTO:.0%}")
-        print()
     else:
         # Get initial balance AND positions for true total equity
         bankroll = trader.get_balance()
@@ -736,11 +698,11 @@ def main():
         database.reset_peak_equity(total_equity)
         print(f"[INFO] Peak equity reset to ${total_equity:.2f}")
 
-        print(f"[INFO] Bot started | Cycle interval: {config.CYCLE_INTERVAL_SEC}s")
-        print(f"[INFO] Markets: Crypto Up/Down (binary)")
-        print(f"[INFO] Strategy: Momentum + Claude confirmation")
-        print(f"[INFO] Kelly: {config.KELLY_FRACTION:.0%} | Max position: {config.CRYPTO_MAX_POSITION_PCT:.0%} | Min edge: {config.MIN_EDGE_CRYPTO:.0%}")
-        print()
+    print(f"[INFO] Bot started | Cycle interval: {config.CYCLE_INTERVAL_SEC}s")
+    print(f"[INFO] Markets: Crypto Up/Down (binary)")
+    print(f"[INFO] Strategy: Momentum + Claude confirmation")
+    print(f"[INFO] Kelly: {config.KELLY_FRACTION:.0%} | Max position: {config.CRYPTO_MAX_POSITION_PCT:.0%} | Min edge: {config.MIN_EDGE_CRYPTO:.0%}")
+    print()
 
     while True:
         try:
