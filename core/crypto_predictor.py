@@ -15,6 +15,8 @@ We buy before the market catches up.
 
 import json
 import os
+import time
+from datetime import datetime, timezone
 import httpx
 import config
 from utils.logger import log
@@ -42,34 +44,91 @@ def _load_strategy_config() -> dict:
     return _strategy_config or {}
 
 
-def detect_regime(symbol: str) -> str:
-    """Detect market regime (trending vs choppy) using ATR from 5m candles.
+def get_regime(symbol: str = "BTCUSDT") -> str:
+    """Returns 'trending', 'choppy', or 'dead' based on last 10 five-minute candles.
 
-    Returns 'trending', 'choppy', or 'neutral'.
+    Uses ATR as volatility proxy + directional consistency.
+    - dead: ATR < 0.05% — no movement at all, skip
+    - trending: 7+/9 candles same direction — strong trend, trade it
+    - choppy: mixed candles — risky for momentum, skip
     """
-    candles = _fetch_candles(symbol, "5m", 20)
-    if not candles or len(candles) < 10:
-        return "neutral"
+    try:
+        resp = httpx.get(
+            "https://api.binance.com/api/v3/klines",
+            params={"symbol": symbol, "interval": "5m", "limit": 10},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        candles = resp.json()
+    except Exception as e:
+        log.error("Failed to fetch 5m candles for regime: %s", e)
+        return "choppy"  # Default to cautious
 
-    # Calculate ATR as percentage of price
-    atr_values = []
-    for c in candles[-10:]:
-        tr = c["high"] - c["low"]
-        atr_pct = (tr / c["close"] * 100) if c["close"] > 0 else 0
-        atr_values.append(atr_pct)
-
-    avg_atr = sum(atr_values) / len(atr_values)
-
-    cfg = _load_strategy_config()
-    thresholds = cfg.get("regime_thresholds", {})
-    atr_trending = thresholds.get("atr_trending_min", 0.06)
-    atr_choppy = thresholds.get("atr_choppy_max", 0.03)
-
-    if avg_atr >= atr_trending:
-        return "trending"
-    elif avg_atr <= atr_choppy:
+    if not candles or len(candles) < 5:
         return "choppy"
-    return "neutral"
+
+    # ATR = average of (high - low) per candle
+    ranges = [float(c[2]) - float(c[3]) for c in candles]
+    atr = sum(ranges) / len(ranges)
+    price = float(candles[-1][4])  # close price
+    atr_pct = atr / price if price > 0 else 0
+
+    # Directional consistency: are candles mostly going one way?
+    closes = [float(c[4]) for c in candles]
+    ups = sum(1 for i in range(1, len(closes)) if closes[i] > closes[i - 1])
+
+    if atr_pct < 0.0005:
+        return "dead"
+    elif ups >= 7 or ups <= 2:
+        return "trending"
+    else:
+        return "choppy"
+
+
+def get_candle_position() -> dict:
+    """Returns where we are inside the current 5-minute candle.
+
+    Polymarket 5m markets start at :00, :05, :10... aligned to UTC.
+    - entry_window: first 90s — best time to enter
+    - mid_candle: 90-210s — only enter on strong signals
+    - late_danger: >210s (3:30 in) — never enter
+    """
+    now = datetime.now(timezone.utc)
+    seconds_into_candle = (now.minute % 5) * 60 + now.second
+
+    phase = (
+        "entry_window" if seconds_into_candle <= 90 else
+        "mid_candle" if seconds_into_candle <= 210 else
+        "late_danger"
+    )
+
+    return {
+        "seconds_elapsed": seconds_into_candle,
+        "seconds_remaining": 300 - seconds_into_candle,
+        "phase": phase,
+    }
+
+
+def should_exit_early(entry_price: float, current_price: float, size: float) -> bool:
+    """Time-based early exit for 5-min crypto positions.
+
+    - Exit if profitable AND less than 45 seconds left (lock in gains)
+    - Exit if losing >15% AND less than 30 seconds left (cut loss, free capital)
+    """
+    candle = get_candle_position()
+    entry_cost = entry_price * size
+    current_value = current_price * size
+    pnl_pct = (current_value - entry_cost) / entry_cost if entry_cost > 0 else 0
+
+    # Lock in any gain near expiry
+    if candle["seconds_remaining"] < 45 and pnl_pct > 0.05:
+        return True
+
+    # Cut loss near expiry to free capital for next candle
+    if candle["seconds_remaining"] < 30 and pnl_pct < -0.15:
+        return True
+
+    return False
 
 BINANCE_SYMBOLS = {
     "bitcoin": "BTCUSDT",

@@ -308,6 +308,21 @@ def run_cycle():
 
     print(f"\n[INFO] === CYCLE {_cycle_count} STARTING ===")
 
+    # --- Step 0: Regime check — skip entire cycle in choppy/dead ---
+    regime = crypto_predictor.get_regime()
+    candle = crypto_predictor.get_candle_position()
+    print(f"[INFO] Regime: {regime} | Candle: {candle['phase']} ({candle['seconds_elapsed']}s in, {candle['seconds_remaining']}s left)")
+
+    if regime in ("choppy", "dead"):
+        print(f"[SKIP] Regime={regime} — no momentum trades this cycle")
+        # Still check existing positions for exits
+        if not config.PAPER_TRADING:
+            bankroll = trader.get_balance()
+            open_trades = database.get_open_trades()
+            if open_trades:
+                _check_existing_positions(open_trades)
+        return
+
     # --- Step 1: Get account state ---
     print("[INFO] Step 1: Checking account state...")
     bankroll = trader.get_balance()
@@ -497,15 +512,26 @@ def run_cycle():
         return
 
     # --- CRYPTO: Deterministic momentum (signal combos from supervisor config) ---
-    print("[INFO] Step 4b: Evaluating crypto momentum (deterministic)...")
+    # Check candle position — never enter in late_danger, require strong in mid_candle
+    if candle["phase"] == "late_danger":
+        print(f"[SKIP] Too late in candle ({candle['seconds_elapsed']}s elapsed) — waiting for next candle")
+        if not config.PAPER_TRADING:
+            _record_equity(bankroll, live_pos_value)
+        _print_portfolio(bankroll, open_trades, recent_trades)
+        return
+
+    print(f"[INFO] Step 4b: Evaluating crypto momentum ({candle['phase']}, {candle['seconds_remaining']}s left)...")
     crypto_opportunities = []
     for market in crypto_markets:
         trade = _evaluate_market(market, effective_bankroll)
         if trade:
+            # Mid-candle: only accept strong signals (high confidence / 3+ boosters)
+            if candle["phase"] == "mid_candle" and trade.get("signal", {}).get("confidence") != "high":
+                print(f"  [SKIP] Mid-candle, weak signal: {trade['question'][:40]}")
+                continue
             crypto_opportunities.append(trade)
             combo = trade.get("signal", {}).get("combo", "?")
-            regime = trade.get("signal", {}).get("regime", "?")
-            print(f"  CRYPTO SIGNAL: {trade['question'][:50]} | {trade['outcome']} @ {trade['price']:.3f} | Edge: {trade['edge']:.1%} | combo={combo} regime={regime}")
+            print(f"  CRYPTO SIGNAL: {trade['question'][:50]} | {trade['outcome']} @ {trade['price']:.3f} | Edge: {trade['edge']:.1%} | combo={combo} phase={candle['phase']}")
 
     all_opportunities = crypto_opportunities
 
@@ -587,6 +613,26 @@ def _check_existing_positions(open_trades: list[dict]):
         # Use tighter take-profit for crypto 5-min markets
         is_crypto = crypto_predictor.is_crypto_updown_market(question)
         tp_threshold = config.TAKE_PROFIT_CRYPTO_PCT if is_crypto else config.TAKE_PROFIT_PCT
+
+        # Time-based early exit for crypto: lock gains or cut losses near candle end
+        if is_crypto and crypto_predictor.should_exit_early(avg_price, current_price, real_size):
+            pnl = (current_price - avg_price) * real_size
+            r_mult = calculate_r_multiple(avg_price, current_price, avg_price)
+            status = "won" if pnl > 0 else "lost"
+            database.update_trade_result(trade["id"], current_price, pnl, r_mult, status)
+            _daily_pnl += pnl
+            candle = crypto_predictor.get_candle_position()
+            print(f"  EARLY EXIT: '{question[:40]}' | PnL=${pnl:+.2f} | {candle['seconds_remaining']}s left")
+
+            if not config.DRY_RUN:
+                try:
+                    client = trader.get_client()
+                    client.cancel_all()
+                except Exception:
+                    pass
+                sell_price = max(0.01, min(0.99, round(current_price - 0.01, 2)))
+                trader.place_limit_order(token_id, sell_price, real_size, "SELL")
+            continue
 
         # Take profit
         gain_pct = (current_price - avg_price) / avg_price if avg_price > 0 else 0
