@@ -1,0 +1,186 @@
+"""Arbitrage scanner — finds crypto markets where Yes + No < $1.00.
+
+Strategy (same as @0x8dxd):
+1. Scan all crypto 5-min up/down markets
+2. Check REAL orderbook prices (not midpoints — actual fillable asks)
+3. If best_ask(Yes) + best_ask(No) < $1.00 → guaranteed profit
+4. Buy both sides → wait for resolution → collect $1.00 per share pair
+5. Profit = $1.00 - cost_yes - cost_no (per share)
+
+Polymarket fees: ~2% on winnings for takers, makers get rebates.
+So we need: Yes_ask + No_ask < ~$0.98 to profit after fees.
+
+With $35 bankroll:
+- 5 shares each side at $0.48 = $4.80 total → $5.00 payout = $0.20 profit
+- Can run 3-4 arbs simultaneously
+- Small but GUARANTEED profit per trade
+"""
+
+from core import trader
+from utils.logger import log
+import config
+
+
+# Polymarket taker fee on winnings
+TAKER_FEE_PCT = 0.02  # 2%
+
+
+def scan_arb_opportunity(market: dict) -> dict | None:
+    """Check if a market has an arbitrage opportunity.
+
+    Returns dict with trade details if arb exists, None otherwise.
+    """
+    question = market.get("question", "")
+    token_ids = market.get("token_ids", [])
+
+    if len(token_ids) < 2:
+        return None
+
+    yes_token = token_ids[0]
+    no_token = token_ids[1]
+
+    # Get REAL orderbooks — we need actual fillable ask prices, not midpoints
+    yes_book = trader.get_orderbook(yes_token)
+    no_book = trader.get_orderbook(no_token)
+
+    if not yes_book.get("asks") or not no_book.get("asks"):
+        return None
+
+    # Best ask = cheapest price we can BUY at
+    yes_best_ask = yes_book["asks"][0]["price"]
+    no_best_ask = no_book["asks"][0]["price"]
+
+    # Available size at best ask
+    yes_ask_size = yes_book["asks"][0]["size"]
+    no_ask_size = no_book["asks"][0]["size"]
+
+    # Total cost to buy 1 share of each side
+    total_cost = yes_best_ask + no_best_ask
+
+    # Payout is always $1.00 (one side wins)
+    # After taker fee on the winning side
+    payout_after_fee = 1.0 - TAKER_FEE_PCT
+
+    # Profit per share pair
+    profit_per_share = payout_after_fee - total_cost
+
+    if profit_per_share <= 0:
+        return None
+
+    # How many shares can we buy? Limited by:
+    # 1. Orderbook depth (minimum of yes/no available)
+    # 2. Our bankroll
+    max_shares_by_book = min(yes_ask_size, no_ask_size)
+
+    # Minimum edge threshold
+    profit_pct = profit_per_share / total_cost
+    if profit_pct < config.MIN_ARB_PROFIT:
+        return None
+
+    return {
+        "question": question,
+        "market_id": market.get("id", ""),
+        "yes_token": yes_token,
+        "no_token": no_token,
+        "yes_price": yes_best_ask,
+        "no_price": no_best_ask,
+        "total_cost": total_cost,
+        "profit_per_share": profit_per_share,
+        "profit_pct": profit_pct,
+        "max_shares": max_shares_by_book,
+        "yes_book_depth": yes_ask_size,
+        "no_book_depth": no_ask_size,
+    }
+
+
+def scan_all_markets(markets: list[dict]) -> list[dict]:
+    """Scan all markets for arbitrage opportunities.
+
+    Returns list of arb opportunities sorted by profit %.
+    """
+    opportunities = []
+
+    for market in markets:
+        arb = scan_arb_opportunity(market)
+        if arb:
+            opportunities.append(arb)
+
+    # Sort by profit % descending
+    opportunities.sort(key=lambda x: x["profit_pct"], reverse=True)
+    return opportunities
+
+
+def execute_arb(arb: dict, bankroll: float) -> dict | None:
+    """Execute an arbitrage trade — buy both sides simultaneously.
+
+    Returns dict with order details or None if failed.
+    """
+    # Calculate position size
+    max_cost = bankroll * config.ARB_MAX_POSITION_PCT
+    cost_per_pair = arb["total_cost"]
+
+    # How many share pairs can we afford?
+    max_by_bankroll = max_cost / cost_per_pair if cost_per_pair > 0 else 0
+    max_by_book = arb["max_shares"]
+
+    shares = min(max_by_bankroll, max_by_book)
+    shares = max(5, int(shares))  # Polymarket minimum 5 shares
+
+    total_cost = shares * cost_per_pair
+    if total_cost > bankroll * 0.90:  # Don't use more than 90% of bankroll
+        shares = max(5, int(bankroll * 0.90 / cost_per_pair))
+        total_cost = shares * cost_per_pair
+
+    expected_profit = shares * arb["profit_per_share"]
+
+    print(f"\n  === ARB TRADE ===")
+    print(f"  Market:  {arb['question'][:50]}")
+    print(f"  YES:     {shares} shares @ ${arb['yes_price']:.3f}")
+    print(f"  NO:      {shares} shares @ ${arb['no_price']:.3f}")
+    print(f"  Cost:    ${total_cost:.2f}")
+    print(f"  Profit:  ${expected_profit:.2f} ({arb['profit_pct']:.1%})")
+    print(f"  =================")
+
+    # Place YES order
+    yes_order = trader.place_limit_order(
+        token_id=arb["yes_token"],
+        price=arb["yes_price"],
+        size=shares,
+        side="BUY",
+    )
+
+    if not yes_order:
+        print(f"  FAILED: YES order failed")
+        return None
+
+    # Place NO order
+    no_order = trader.place_limit_order(
+        token_id=arb["no_token"],
+        price=arb["no_price"],
+        size=shares,
+        side="BUY",
+    )
+
+    if not no_order:
+        print(f"  WARNING: NO order failed — YES order is naked!")
+        print(f"  Cancelling YES order {yes_order}...")
+        trader.cancel_order(yes_order)
+        return None
+
+    print(f"  YES order: {yes_order}")
+    print(f"  NO order:  {no_order}")
+
+    return {
+        "question": arb["question"],
+        "market_id": arb["market_id"],
+        "yes_token": arb["yes_token"],
+        "no_token": arb["no_token"],
+        "yes_price": arb["yes_price"],
+        "no_price": arb["no_price"],
+        "shares": shares,
+        "total_cost": total_cost,
+        "expected_profit": expected_profit,
+        "profit_pct": arb["profit_pct"],
+        "yes_order": yes_order,
+        "no_order": no_order,
+    }

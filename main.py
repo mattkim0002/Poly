@@ -17,6 +17,7 @@ sys.stderr.reconfigure(line_buffering=True)
 import config
 from core import database, market_data, trader, crypto_predictor
 from strategies.risk import calculate_r_multiple, expectancy, drawdown_multiplier, drawdown
+from strategies.arbitrage import scan_all_markets, execute_arb
 from utils.logger import log
 
 _cycle_count = 0
@@ -435,8 +436,66 @@ def run_cycle():
         _print_portfolio(bankroll, open_trades, recent_trades)
         return
 
-    # --- Step 5: Evaluate each market ---
-    print("[INFO] Step 4: Evaluating momentum signals...")
+    # === STRATEGY 1: ARBITRAGE (guaranteed profit) ===
+    # Scan ALL crypto markets for Yes+No < $0.98 opportunities
+    print("[INFO] Step 4a: Scanning for arbitrage (guaranteed profit)...")
+    arb_opportunities = scan_all_markets(crypto_markets)
+    arb_trades_placed = 0
+
+    if arb_opportunities:
+        print(f"  Found {len(arb_opportunities)} arb opportunities!")
+        for arb in arb_opportunities[:2]:  # Max 2 arb trades per cycle
+            print(f"  ARB: {arb['question'][:45]} | Yes ${arb['yes_price']:.3f} + No ${arb['no_price']:.3f} = ${arb['total_cost']:.3f} | Profit: {arb['profit_pct']:.1%}")
+            if not config.PAPER_TRADING:
+                result = execute_arb(arb, effective_bankroll)
+                if result:
+                    arb_trades_placed += 1
+                    effective_bankroll -= result["total_cost"]
+                    # Record both sides in DB
+                    database.record_trade(
+                        market_id=result["market_id"],
+                        market_question=f"[ARB-YES] {result['question'][:80]}",
+                        token_id=result["yes_token"],
+                        side="BUY", outcome="Yes",
+                        entry_price=result["yes_price"],
+                        size=result["shares"],
+                        cost=result["shares"] * result["yes_price"],
+                        order_id=result["yes_order"],
+                        claude_probability=0.0, market_probability=result["yes_price"],
+                        edge=result["profit_pct"], kelly_frac=0.0,
+                        dd_mult=1.0, signal_mult=1.0,
+                    )
+                    database.record_trade(
+                        market_id=result["market_id"],
+                        market_question=f"[ARB-NO] {result['question'][:80]}",
+                        token_id=result["no_token"],
+                        side="BUY", outcome="No",
+                        entry_price=result["no_price"],
+                        size=result["shares"],
+                        cost=result["shares"] * result["no_price"],
+                        order_id=result["no_order"],
+                        claude_probability=0.0, market_probability=result["no_price"],
+                        edge=result["profit_pct"], kelly_frac=0.0,
+                        dd_mult=1.0, signal_mult=1.0,
+                    )
+            else:
+                print(f"  [PAPER] Would execute arb — skipping in paper mode")
+    else:
+        print("[INFO] No arb opportunities (spreads are tight)")
+
+    if arb_trades_placed:
+        print(f"[INFO] {arb_trades_placed} arb trade(s) placed (guaranteed profit)")
+
+    # === STRATEGY 2: MOMENTUM (directional bets with Claude gate) ===
+    # Only if we have bankroll left and position slots available
+    if effective_bankroll < 5:
+        print("[INFO] Not enough bankroll for momentum trades after arb")
+        if not config.PAPER_TRADING:
+            _record_equity(bankroll, live_pos_value)
+        _print_portfolio(bankroll, open_trades, recent_trades)
+        return
+
+    print("[INFO] Step 4b: Evaluating momentum signals (Claude gate)...")
     opportunities = []
     for market in crypto_markets:
         trade = _evaluate_market(market, effective_bankroll)
@@ -444,7 +503,6 @@ def run_cycle():
             opportunities.append(trade)
             print(f"  SIGNAL: {trade['question'][:50]} | {trade['outcome']} @ {trade['price']:.3f} | Edge: {trade['edge']:.1%}")
 
-    # --- Step 6: Execute best opportunity (highest edge) ---
     if not opportunities:
         print("[INFO] No momentum signals found")
         if not config.PAPER_TRADING:
@@ -456,7 +514,7 @@ def run_cycle():
     opportunities.sort(key=lambda t: t["edge"], reverse=True)
     best = opportunities[0]
 
-    print(f"\n[INFO] Step 5: Executing best trade (edge: {best['edge']:.1%})...")
+    print(f"\n[INFO] Step 5: Executing best momentum trade (edge: {best['edge']:.1%})...")
     _execute_trade(best, effective_bankroll)
 
     # --- Step 7: Record & summarize ---
