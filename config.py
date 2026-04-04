@@ -188,8 +188,9 @@ CLAUDE_MAX_TOKENS = 300
 
 # === Order Execution ===
 # Math: 1 cent improvement on a $0.50 market = 2% edge cost.
-# With 5% edge, that's 40% of our edge gone. Use 0 for limit orders.
-PRICE_IMPROVEMENT = 0.01           # 1 cent — minimal edge sacrifice
+# But with 0 improvement, orders DON'T FILL (sitting at 0/8).
+# Need 2-3 cents above midpoint to cross the spread and get filled.
+PRICE_IMPROVEMENT = 0.03           # 3 cents — pay the spread to actually get filled
 
 # === Database ===
 DB_PATH = "polybot.db"

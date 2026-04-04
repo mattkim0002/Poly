@@ -741,6 +741,15 @@ def main():
         print(f"[INFO] Paper balance: ${paper_balance:.2f}")
         _print_banner(paper_balance)
     else:
+        # Cancel ALL unfilled orders on startup to free locked capital
+        print("[INFO] Cancelling stale open orders...")
+        try:
+            client = trader.get_client()
+            client.cancel_all()
+            print("[INFO] All open orders cancelled — capital freed")
+        except Exception as e:
+            print(f"[WARN] Failed to cancel orders: {e}")
+
         # Get initial balance AND positions for true total equity
         bankroll = trader.get_balance()
         print(f"[INFO] Cash balance: ${bankroll:.2f}")
