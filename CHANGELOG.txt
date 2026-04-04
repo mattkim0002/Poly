@@ -1,0 +1,271 @@
+POLYMARKET TRADING BOT — FULL CHANGELOG & STRATEGY GUIDE
+=========================================================
+Last Updated: April 4, 2026
+Repository: github.com/mattkim0002/Poly
+Branch: claude/polymarket-bot-kelly-onJlJ
+Droplet: 178.128.229.98 (DigitalOcean)
+Dashboard: http://178.128.229.98:8080
+
+
+=== CURRENT STRATEGY ===
+
+The bot runs TWO strategies every 15 seconds:
+
+STRATEGY 1: ARBITRAGE (Zero Risk)
+- Scans all crypto 5-min up/down markets
+- Checks real orderbook prices for Yes and No sides
+- If Yes_ask + No_ask < $0.98 → buys BOTH sides
+- Market resolves → guaranteed $1.00 payout regardless of outcome
+- Profit = $1.00 - total_cost - 2% fee
+- Inspired by @0x8dxd who made $2.38M with this approach
+- If one side fails to fill, cancels the other (no naked exposure)
+
+STRATEGY 2: MOMENTUM + CLAUDE GATE (Directional)
+- Detects real-time Binance price movements (0.04%+ in 60 seconds)
+- Requires 2+ confirming signals (volume spike, acceleration, orderbook, whales)
+- TradingView analysis as optional confirmation
+- Claude AI (Sonnet) reviews ALL raw data and APPROVES or REJECTS every trade
+- If Claude says no → trade is blocked
+- If Claude is unavailable → trade is blocked (safety first)
+- Only executes when multiple independent signals agree
+
+
+=== BANKROLL MATH ($35 account) ===
+
+Position Sizing:
+- Polymarket minimum order: $5 (14.3% of $35 bankroll)
+- Kelly optimal for 55/45 edge at even odds: 10% ($3.50)
+- Since minimum is $5, every trade is slightly above Kelly optimal
+- This means we MUST be very selective → Claude gate is essential
+
+Risk Limits:
+- Max 3 positions at once = $15 at risk (43% of bankroll)
+- Daily loss cap: $7 (20% of bankroll) → bot stops for the day
+- Drawdown halt: 35% ($12 loss) → bot stops entirely
+- Drawdown half: 20% ($7 loss) → position sizes halved
+
+Stop Loss / Take Profit:
+- Stop loss: 40% (5-min markets resolve to $0 or $1 naturally)
+- A 6.15% stop was getting triggered by normal noise → killing winners
+- Take profit crypto: 20% (lock gains if price jumps before resolution)
+- Take profit other: 30%
+
+
+=== ALL CHANGES MADE (CHRONOLOGICAL) ===
+
+--- Phase 1: Foundation (Original Bot) ---
+
+1. Kelly Criterion position sizing (40% Kelly)
+2. Drawdown protection (Chan method: halve at 20%, stop at 30%)
+3. Rolling win rate tracking (Simons method)
+4. R-multiple tracking for trade quality
+5. Correlation filter to avoid duplicate bets
+6. Long-shot bias correction (Taleb method)
+7. SQLite database for trade tracking
+8. Flask dashboard on port 8080
+
+--- Phase 2: Market Filtering ---
+
+9. SPORTS BLACKLIST — Massive keyword set blocks:
+   - All traditional sports (NBA, NFL, MLB, etc.)
+   - Esports (CS2, LoL, Valorant, etc.)
+   - Entertainment (Netflix, Spotify, celebrities, etc.)
+   - Random guessing (lottery, coin flip, weather records, etc.)
+
+10. WHITELIST APPROACH — Only trade markets with data edge:
+    - Crypto (Binance data)
+    - US politics (Claude + news)
+    - Geopolitical (Claude + news)
+    - Finance/economics (Claude + news)
+
+--- Phase 3: Crypto Focus ---
+
+11. TradingView integration — buy/sell signals across 1m, 5m, 15m
+    - RSI, MACD, Stochastic, CCI, ADX, Bollinger Bands
+    - Moving averages (EMA10, EMA20, EMA50)
+    - Oscillators + moving averages consensus
+
+12. Binance real-time data:
+    - 1-second and 1-minute candles for momentum
+    - Order book depth (bid/ask imbalance)
+    - Volume pressure (buy vs sell ratio)
+    - Large/whale trade detection
+    - Funding rate (contrarian signal)
+    - Open interest
+
+13. Momentum detection thresholds:
+    - Strong signal: 0.08% move in 60 seconds
+    - Medium signal: 0.04% move in 60 seconds
+    - Requires volume spike (2x average) to confirm
+    - Checks if move is accelerating (getting stronger)
+
+--- Phase 4: Claude AI Integration ---
+
+14. Claude as GATE for every trade:
+    - Sees all raw Binance data (price change, volume, pressure)
+    - Sees all confirming signals (boosters)
+    - Responds APPROVE or REJECT with reasoning
+    - If Claude unavailable → trade blocked (safety)
+    - Model: claude-sonnet-4-6
+
+15. Claude for non-crypto markets (politics, geo, finance):
+    - Reads live Google News RSS headlines
+    - Estimates probability with reasoning
+    - "Low confidence" → skip
+    - "No edge" / "uncertain" / "coin flip" in reasoning → skip
+    - Medium confidence needs 15%+ edge
+
+--- Phase 5: Risk & Learning ---
+
+16. Adaptive learning system:
+    - Classifies markets: crypto, politics, geopolitical, climate, finance, other
+    - Tracks win rate and P&L by category
+    - Winning categories: +edge boost, 1.25x position size
+    - Losing categories: -edge penalty, 0.5x position size
+    - 0% win rate over 3+ trades → skip category entirely
+    - Crypto is NEVER skipped (just reduced size)
+
+17. Loss pattern learning (Perplexity addition):
+    - Records every stop-loss exit by category + price range
+    - If same pattern triggers 3+ stop-outs → auto-avoids
+
+--- Phase 6: Critical Bug Fixes ---
+
+18. DD=0.0 BUG FIX (was blocking ALL trades for 40+ cycles):
+    - Bug: position_sizing used cash-only ($2.68) vs peak ($76.82)
+    - This calculated 96.5% "drawdown" → DD=0.0 → $0 position size
+    - Fix: now uses total equity (cash + positions) for drawdown calc
+    - Fix: reset peak equity on every startup
+
+19. Stale peak equity fix:
+    - reset_peak_equity() now caps ALL historical peaks
+    - Prevents old peaks from permanently blocking trades
+
+20. Dead token fix:
+    - Tracks tokens with no orderbook in memory
+    - Stops retrying them every 10 seconds (was spamming 404 errors)
+
+21. Unfilled order fix:
+    - Only sells positions that actually filled on Polymarket
+    - Unfilled orders marked as "cancelled" in DB
+    - Cancel all orders before selling (frees locked balance)
+
+22. Position sync on startup:
+    - Fetches real Polymarket positions via data API
+    - Imports into local DB so bot knows what it owns
+    - Uses live position values (not stale DB cost basis)
+
+23. Unfilled order fix (latest):
+    - Orders sitting at 0/8 filled because price was at midpoint
+    - Increased price improvement to 3 cents (crosses the spread)
+    - Cancel all stale orders on startup to free locked capital
+
+--- Phase 7: Arbitrage Strategy ---
+
+24. ARBITRAGE SCANNER (new):
+    - Scans all crypto markets for Yes + No < $0.98
+    - Checks REAL orderbook asks (not midpoints)
+    - Calculates profit per share after 2% taker fee
+    - Sorts opportunities by profit percentage
+
+25. DUAL-SIDE EXECUTION:
+    - Buys YES and NO simultaneously
+    - If one side fails → cancels the other (no naked exposure)
+    - Records both sides in database
+    - Max 2 arb trades per cycle
+
+
+=== CURRENT CONFIG VALUES ===
+
+Trading Cycle: 15 seconds
+Max Markets Scanned: 50 per cycle
+Market Window: 7 days to resolution
+
+Edge Thresholds:
+- Min edge: 5%
+- Min edge crypto: 5%
+- Min EV per dollar: $0.02
+
+Position Sizing:
+- Kelly fraction: 40%
+- Max per trade: 20% of bankroll
+- Max open positions: 3
+- Min order: $1 (bumped to $5 by Polymarket)
+
+Risk Management:
+- Drawdown halt: 35%
+- Drawdown half: 20%
+- Daily loss cap: 20% of bankroll
+- Stop loss: 40% (let 5-min markets resolve)
+- Take profit crypto: 20%
+- Take profit other: 30%
+
+Momentum Detection:
+- Strong signal: 0.08% in 60 seconds
+- Medium signal: 0.04% in 60 seconds
+- Volume spike: 2x average required
+- Needs 2+ confirming boosters
+
+Claude AI:
+- Model: claude-sonnet-4-6
+- Max calls: 20 per cycle
+- Max tokens: 300 (short approve/reject)
+
+Order Execution:
+- Price improvement: 3 cents (cross the spread)
+- GTC limit orders (good till cancelled)
+- Sig type 2 (proxy wallet)
+
+
+=== HOW TO OPERATE ===
+
+Start bot + dashboard (live):
+  cd ~/Poly && bash start.sh live
+
+Start in paper mode (no real money):
+  cd ~/Poly && bash start.sh paper
+
+Watch logs:
+  tail -f ~/Poly/bot.log
+
+Stop everything:
+  pkill -9 -f python3
+
+Pull latest code:
+  cd ~/Poly && git pull origin claude/polymarket-bot-kelly-onJlJ
+
+Dashboard:
+  http://178.128.229.98:8080
+
+Check if bot is running:
+  ps aux | grep python3
+
+
+=== KEY FILES ===
+
+main.py                    — Main trading loop (both strategies)
+config.py                  — All settings and thresholds
+core/crypto_predictor.py   — Binance + TradingView + Claude gate
+core/trader.py             — Polymarket CLOB client (order execution)
+core/market_data.py        — Gamma API (market scanning)
+core/database.py           — SQLite persistence
+core/paper_trader.py       — Paper trading simulator
+core/news.py               — Google News RSS for Claude
+core/analyzer.py           — Claude AI probability estimation
+strategies/arbitrage.py    — Arb scanner + dual-side execution
+strategies/position_sizing.py — Kelly + drawdown + signal multipliers
+strategies/risk.py         — Drawdown protection + win rate
+strategies/learner.py      — Adaptive learning by category
+strategies/kelly.py        — Kelly Criterion formula
+strategies/filters.py      — Correlation + long-shot bias
+strategies/ev.py           — Edge and expected value calculations
+dashboard.py               — Flask web dashboard (port 8080)
+start.sh                   — Startup script (bot + dashboard)
+utils/logger.py            — Logging config
+
+
+=== ACCOUNTS & CREDENTIALS ===
+
+Polymarket Proxy Wallet: 0xa1A623585f0D860c3156c8d2b6ADFFc066922c69
+Droplet IP: 178.128.229.98
+SSH: ssh root@178.128.229.98
