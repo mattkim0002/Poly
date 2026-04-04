@@ -651,37 +651,37 @@ def estimate_crypto_probability(question: str, market_price: float, outcome: str
     log.info("Crypto MOMENTUM for '%s' (%s): prob=%.2f conf=%s | %s",
              question[:50], outcome, prob, confidence, reasoning)
 
-    # === Claude confirmation gate ===
-    # Ask Claude to review the momentum data and confirm/reject the trade
-    claude_result = claude_confirm_trade(
-        question=question,
-        symbol=symbol,
-        direction="UP" if signal_up else "DOWN",
-        price_change_60s=price_change_60s,
-        price_change_180s=momentum.get("price_change_180s", 0),
-        volume_ratio=momentum.get("volume_ratio", 1.0),
-        buy_pressure=momentum.get("buy_pressure", 0.5),
-        is_accelerating=momentum.get("is_accelerating", False),
-        boosters=booster_details,
-        market_price=market_price,
-        our_probability=prob,
-        signal_strength=signal_strength,
-    )
+    # === DETERMINISTIC GATE (no Claude — too slow for crypto) ===
+    # Post Feb 18, 2026: taker orders execute instantly, Claude's 300-500ms
+    # latency means the window is already closed by the time we trade.
+    # Use deterministic rules instead:
 
-    if claude_result is None:
-        # Claude unavailable — BLOCK the trade for safety
-        log.warning("Claude unavailable — blocking trade for safety")
+    # Rule 1: Reject if momentum is fading (180s move >> 60s move)
+    if abs(price_change_180s) > 0 and abs(price_change_60s) < abs(price_change_180s) * 0.3:
+        log.info("REJECT '%s': momentum fading (60s=%.4f%% vs 180s=%.4f%%)",
+                 question[:40], price_change_60s, price_change_180s)
         return None
-    elif not claude_result["approved"]:
-        log.info("CLAUDE REJECTED '%s': %s", question[:40], claude_result["reason"])
+
+    # Rule 2: Reject if signals contradict (price up but sell pressure)
+    if signal_up and buy_pressure < 0.35:
+        log.info("REJECT '%s': price up but sell pressure %.0f%%",
+                 question[:40], buy_pressure * 100)
         return None
-    else:
-        # Claude approved — log reasoning and optionally adjust probability
-        log.info("CLAUDE APPROVED '%s': %s", question[:40], claude_result["reason"])
-        reasoning += f" | Claude: {claude_result['reason'][:80]}"
-        # If Claude is very confident, small boost
-        if "strong" in claude_result["reason"].lower() or "clear" in claude_result["reason"].lower():
-            prob = min(0.85, prob + 0.02)
+    if not signal_up and buy_pressure > 0.65:
+        log.info("REJECT '%s': price down but buy pressure %.0f%%",
+                 question[:40], buy_pressure * 100)
+        return None
+
+    # Rule 3: Reject if edge is too thin after estimated fees
+    estimated_fee_pct = 0.072 * market_price * (1.0 - market_price)
+    net_edge = abs(prob - market_price) - estimated_fee_pct
+    if net_edge < 0.03:
+        log.info("REJECT '%s': edge %.1f%% too thin after %.1f%% fee",
+                 question[:40], abs(prob - market_price) * 100, estimated_fee_pct * 100)
+        return None
+
+    log.info("APPROVED (deterministic) '%s': %d boosters, net_edge=%.1f%%",
+             question[:40], boosters, net_edge * 100)
 
     return {
         "probability": prob,

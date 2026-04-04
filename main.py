@@ -425,9 +425,10 @@ def run_cycle():
     # Skip markets we already have positions in
     markets = [m for m in markets if not any(tid in open_token_ids for tid in m.get("token_ids", []))]
 
-    # CRYPTO ONLY — only keep crypto up/down markets
+    # Separate crypto from non-crypto (geopolitics, politics, finance)
     crypto_markets = [m for m in markets if crypto_predictor.is_crypto_updown_market(m.get("question", ""))]
-    print(f"[INFO] {len(crypto_markets)} crypto up/down markets to evaluate")
+    non_crypto_markets = [m for m in markets if not crypto_predictor.is_crypto_updown_market(m.get("question", ""))]
+    print(f"[INFO] {len(crypto_markets)} crypto | {len(non_crypto_markets)} geo/politics/finance markets")
 
     # --- Step 4: Check position limit ---
     if not config.PAPER_TRADING and len(open_trades) >= config.MAX_OPEN_POSITIONS:
@@ -495,26 +496,91 @@ def run_cycle():
         _print_portfolio(bankroll, open_trades, recent_trades)
         return
 
-    print("[INFO] Step 4b: Evaluating momentum signals (Claude gate)...")
-    opportunities = []
+    # --- CRYPTO: Deterministic momentum (no Claude, fast) ---
+    print("[INFO] Step 4b: Evaluating crypto momentum (deterministic)...")
+    crypto_opportunities = []
     for market in crypto_markets:
         trade = _evaluate_market(market, effective_bankroll)
         if trade:
-            opportunities.append(trade)
-            print(f"  SIGNAL: {trade['question'][:50]} | {trade['outcome']} @ {trade['price']:.3f} | Edge: {trade['edge']:.1%}")
+            crypto_opportunities.append(trade)
+            print(f"  CRYPTO SIGNAL: {trade['question'][:50]} | {trade['outcome']} @ {trade['price']:.3f} | Edge: {trade['edge']:.1%}")
 
-    if not opportunities:
-        print("[INFO] No momentum signals found")
+    # --- NON-CRYPTO: Claude-analyzed (geopolitics=free, politics=low fee) ---
+    non_crypto_opportunities = []
+    if non_crypto_markets and not config.PAPER_TRADING:
+        # Limit Claude calls — these markets move slowly, 3 per cycle is enough
+        evaluate_count = min(3, len(non_crypto_markets))
+        if evaluate_count > 0:
+            print(f"[INFO] Step 4c: Evaluating {evaluate_count} geo/politics markets (Claude)...")
+            try:
+                from core import analyzer
+                for market in non_crypto_markets[:evaluate_count]:
+                    question = market["question"]
+                    outcomes = market.get("outcomes", ["Yes", "No"])
+                    outcome_prices = market.get("outcome_prices", [])
+                    token_ids = market.get("token_ids", [])
+
+                    if not outcome_prices or not token_ids or len(token_ids) < 2:
+                        continue
+                    yes_price = outcome_prices[0]
+                    if yes_price <= 0.10 or yes_price >= 0.90:
+                        continue
+
+                    estimate = analyzer.estimate_probability(question, outcomes, outcome_prices)
+                    if not estimate or estimate.get("confidence") == "low":
+                        continue
+
+                    claude_prob = estimate["probability"]
+                    yes_edge = claude_prob - yes_price
+                    no_edge = (1.0 - claude_prob) - (1.0 - yes_price)
+
+                    # Fee-free markets need less edge
+                    from strategies.ev import is_fee_free_market
+                    min_edge = 0.03 if is_fee_free_market(question) else 0.08
+
+                    if yes_edge >= min_edge:
+                        non_crypto_opportunities.append({
+                            "market_id": market["id"],
+                            "question": question,
+                            "token_id": token_ids[0],
+                            "outcome": outcomes[0],
+                            "price": yes_price,
+                            "probability": claude_prob,
+                            "edge": yes_edge,
+                            "signal": {"reasoning": estimate.get("reasoning", "")},
+                        })
+                        print(f"  CLAUDE SIGNAL: {question[:50]} | Yes @ {yes_price:.2f} | Edge: {yes_edge:.1%}")
+                    elif abs(no_edge) >= min_edge and no_edge > 0:
+                        no_price = 1.0 - yes_price
+                        non_crypto_opportunities.append({
+                            "market_id": market["id"],
+                            "question": question,
+                            "token_id": token_ids[1],
+                            "outcome": outcomes[1] if len(outcomes) > 1 else "No",
+                            "price": no_price,
+                            "probability": 1.0 - claude_prob,
+                            "edge": no_edge,
+                            "signal": {"reasoning": estimate.get("reasoning", "")},
+                        })
+                        print(f"  CLAUDE SIGNAL: {question[:50]} | No @ {no_price:.2f} | Edge: {no_edge:.1%}")
+            except Exception as e:
+                print(f"[WARN] Claude analysis failed: {e}")
+
+    # Combine all opportunities
+    all_opportunities = crypto_opportunities + non_crypto_opportunities
+
+    if not all_opportunities:
+        print("[INFO] No trading signals found")
         if not config.PAPER_TRADING:
             _record_equity(bankroll, live_pos_value)
         _print_portfolio(bankroll, open_trades, recent_trades)
         return
 
     # Sort by edge descending — best opportunity first
-    opportunities.sort(key=lambda t: t["edge"], reverse=True)
-    best = opportunities[0]
+    all_opportunities.sort(key=lambda t: t["edge"], reverse=True)
+    best = all_opportunities[0]
 
-    print(f"\n[INFO] Step 5: Executing best momentum trade (edge: {best['edge']:.1%})...")
+    print(f"\n[INFO] Step 5: Executing best trade (edge: {best['edge']:.1%})...")
     _execute_trade(best, effective_bankroll)
 
     # --- Step 7: Record & summarize ---

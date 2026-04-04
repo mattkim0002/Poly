@@ -17,16 +17,16 @@ With $35 bankroll:
 """
 
 from core import trader
+from strategies.ev import get_fee_rate, calculate_taker_fee, is_fee_free_market
 from utils.logger import log
 import config
 
 
-# Polymarket taker fee on winnings
-TAKER_FEE_PCT = 0.02  # 2%
-
-
 def scan_arb_opportunity(market: dict) -> dict | None:
     """Check if a market has an arbitrage opportunity.
+
+    Post Feb 18 2026: uses dynamic fee model per token.
+    Prioritizes fee-free markets (geopolitics) where taker arb is still viable.
 
     Returns dict with trade details if arb exists, None otherwise.
     """
@@ -57,12 +57,27 @@ def scan_arb_opportunity(market: dict) -> dict | None:
     # Total cost to buy 1 share of each side
     total_cost = yes_best_ask + no_best_ask
 
-    # Payout is always $1.00 (one side wins)
-    # After taker fee on the winning side
-    payout_after_fee = 1.0 - TAKER_FEE_PCT
+    # === DYNAMIC FEE CALCULATION (post Feb 18, 2026) ===
+    # Fee = shares × feeRate × p × (1-p), applied to winning side only
+    # For arb, one side always wins → calculate fee on both, take the max
+    fee_free = is_fee_free_market(question)
 
-    # Profit per share pair
-    profit_per_share = payout_after_fee - total_cost
+    if fee_free:
+        # Geopolitics = zero fees! Taker arb is fully viable
+        yes_fee_per_share = 0.0
+        no_fee_per_share = 0.0
+        fee_rate = 0.0
+    else:
+        # Fetch actual fee rate from Polymarket API
+        fee_rate = get_fee_rate(yes_token)
+        yes_fee_per_share = fee_rate * yes_best_ask * (1.0 - yes_best_ask)
+        no_fee_per_share = fee_rate * no_best_ask * (1.0 - no_best_ask)
+
+    # Worst-case fee (whichever side wins, we pay that fee)
+    max_fee = max(yes_fee_per_share, no_fee_per_share)
+
+    # Payout is always $1.00, minus the fee on the winning side
+    profit_per_share = 1.0 - total_cost - max_fee
 
     if profit_per_share <= 0:
         return None
@@ -90,6 +105,9 @@ def scan_arb_opportunity(market: dict) -> dict | None:
         "max_shares": max_shares_by_book,
         "yes_book_depth": yes_ask_size,
         "no_book_depth": no_ask_size,
+        "fee_rate": fee_rate,
+        "fee_per_share": max_fee,
+        "fee_free": fee_free,
     }
 
 

@@ -109,9 +109,32 @@ def get_active_markets(limit: int = 100) -> list[dict]:
             "end_date": m.get("endDate") or m.get("end_date_iso") or "",
         })
 
-    # CRYPTO ONLY: Filter for up/down markets — we only trade crypto
-    filtered = [m for m in filtered if "up or down" in (m.get("question", "") or "").lower()]
+    # Filter to markets we have edge in: crypto up/down + geopolitics (zero fees) + politics/finance
+    def _has_edge(m):
+        q = (m.get("question", "") or "").lower()
+        # Crypto up/down — momentum edge
+        if "up or down" in q:
+            return True
+        # Geopolitics — ZERO taker fees, Claude analysis edge
+        geo_terms = {"iran", "russia", "ukraine", "china", "taiwan", "nato",
+                     "sanctions", "ceasefire", "missile", "nuclear", "war ",
+                     "invasion", "israel", "gaza", "north korea", "military",
+                     "troops", "strike", "bombing", "peace", "treaty"}
+        if any(t in q for t in geo_terms):
+            return True
+        # US politics — Claude + news edge (low fees)
+        pol_terms = {"trump", "biden", "congress", "senate", "supreme court",
+                     "executive order", "impeach", "white house", "tariff"}
+        if any(t in q for t in pol_terms):
+            return True
+        # Finance — Claude + data edge
+        fin_terms = {"fed ", "interest rate", "inflation", "gdp",
+                     "oil price", "s&p 500", "nasdaq", "recession"}
+        if any(t in q for t in fin_terms):
+            return True
+        return False
 
+    filtered = [m for m in filtered if _has_edge(m)]
 
     log.info("Fetched %d markets, %d pass filters", len(markets), len(filtered))
     return filtered
