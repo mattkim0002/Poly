@@ -100,14 +100,14 @@ PREFERRED_KEYWORDS = {
 }
 
 # === Edge / EV Thresholds ===
-MIN_EDGE = 0.08                    # 8% minimum edge — only trade when Polymarket is clearly mispriced
-MIN_EDGE_CRYPTO = 0.08             # Same — need real edge, not coin flips
-MIN_EV_PER_DOLLAR = 0.02           # $0.02 minimum EV per dollar
+MIN_EDGE = 0.05                    # 5% minimum edge for non-crypto
+MIN_EDGE_CRYPTO = 0.03             # 3% for crypto — need real signal, not noise
+MIN_EV_PER_DOLLAR = 0.01           # $0.01 minimum EV per dollar
 
 # === Position Sizing ===
-KELLY_FRACTION = 0.25              # Quarter-Kelly
-MAX_POSITION_PCT = 0.20            # 20% max per trade — we're high confidence
-MAX_OPEN_POSITIONS = 2             # Only 2 positions at a time (was 3)
+KELLY_FRACTION = 0.30              # 30% Kelly — balanced aggression
+MAX_POSITION_PCT = 0.15            # 15% max per trade
+MAX_OPEN_POSITIONS = 5             # More positions to catch more opportunities
 MIN_ORDER_SIZE_USD = 1.0
 
 # === Risk Management (Chan Drawdown) ===
@@ -115,13 +115,13 @@ DD_THRESHOLD_HALF = 0.20           # Halve size at 20% drawdown
 DD_THRESHOLD_STOP = 0.30           # Stop trading at 30% drawdown
 
 # === Stop Loss / Take Profit ===
-STOP_LOSS_PCT = 0.0615             # 6.15% stop loss (user requirement)
-TAKE_PROFIT_PCT = 0.10             # 10% take profit for all crypto
-TAKE_PROFIT_CRYPTO_PCT = 0.10      # Same
+STOP_LOSS_PCT = 0.15               # 15% stop loss — gives positions room to breathe
+TAKE_PROFIT_PCT = 0.10             # 10% take profit
+TAKE_PROFIT_CRYPTO_PCT = 0.08      # 8% take profit for crypto — lock in gains
 TAKE_PROFIT_EDGE_MIN = 0.01        # Exit if edge drops below 1%
 
 # === Crypto Position Limits ===
-CRYPTO_MAX_POSITION_PCT = 0.15     # 15% of bankroll per crypto bet — conservative until proven
+CRYPTO_MAX_POSITION_PCT = 0.20     # 20% of bankroll per crypto bet
 CRYPTO_CHECK_INTERVAL_SEC = 5      # Check positions every 5 seconds — speed matters
 
 # === Real-Time Edge Detection Thresholds ===
