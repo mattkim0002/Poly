@@ -1,4 +1,26 @@
-"""Configuration constants for the Polymarket trading bot."""
+"""Configuration constants for the Polymarket trading bot.
+
+=== MATH-BASED SETTINGS (bankroll: $35) ===
+
+Binary option math:
+- Buy YES at $0.50, win → $1.00 (100% return), lose → $0 (100% loss)
+- Kelly formula for binary: f* = (q - p) / (1 - p)
+  where q = true probability, p = market price
+- For q=0.60, p=0.50: f* = 0.10/0.50 = 0.20 (20% of bankroll)
+
+With $35 bankroll:
+- Polymarket minimum order = $5 = 14.3% of bankroll
+- So every trade is already ~full Kelly for a 5% edge trade
+- Can't go smaller → must be VERY selective (Claude gate)
+- Max 3 concurrent positions = $15 at risk (43% of bankroll)
+
+Stop loss on 5-min markets:
+- Markets resolve to $0 or $1 within 5 minutes
+- Normal binary option price swings: 10-20% in minutes
+- Tight stop losses (6%) = get stopped out of winners constantly
+- Better approach: let 5-min markets RESOLVE naturally, use stop
+  loss only for longer-duration positions
+"""
 
 import os
 from dotenv import load_dotenv
@@ -12,7 +34,7 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 
 # === Paper Trading ===
-PAPER_TRADING = os.getenv("PAPER_TRADING", "true").lower() == "true"  # Default ON — set to false for live
+PAPER_TRADING = os.getenv("PAPER_TRADING", "false").lower() == "true"
 PAPER_STARTING_BALANCE = float(os.getenv("PAPER_STARTING_BALANCE", "100.0"))
 
 # === Polymarket ===
@@ -21,21 +43,20 @@ GAMMA_HOST = "https://gamma-api.polymarket.com"
 CHAIN_ID = 137  # Polygon
 
 # === Trading Cycle ===
-CYCLE_INTERVAL_SEC = 15            # Momentum scanning interval
-MAX_MARKETS_PER_CYCLE = 50         # Keep scanning lots
+CYCLE_INTERVAL_SEC = 15            # Fast scanning for momentum
+MAX_MARKETS_PER_CYCLE = 50
 
 # === Market Filters ===
-MIN_VOLUME = 5                     # Keep low for new markets
-MIN_LIQUIDITY = 50                 # Lower — we check orderbook depth ourselves
+MIN_VOLUME = 5
+MIN_LIQUIDITY = 50
+MAX_DAYS_TO_RESOLUTION = 1         # Only short-term crypto markets
 
 # === Arbitrage Settings ===
-MIN_ARB_PROFIT = 0.005             # Minimum 0.5 cents profit per share (0.5%) — catch small gaps
-ARB_MAX_POSITION_PCT = 0.40        # Up to 40% of bankroll per arb (low risk since hedged)
-MAX_DAYS_TO_RESOLUTION = 1         # Only markets resolving within 1 day (5-min, 15-min, 1-hour)
+MIN_ARB_PROFIT = 0.005
+ARB_MAX_POSITION_PCT = 0.40
 
-# === Sports Filter — skip these categories ===
+# === Sports Filter ===
 SPORTS_KEYWORDS = {
-    # Traditional sports
     "nba", "nfl", "mlb", "nhl", "mls", "ufc", "wwe", "wnba",
     "premier league", "la liga", "champions league", "serie a", "bundesliga",
     "ligue 1", "eredivisie", "copa america", "euro 2026",
@@ -54,17 +75,14 @@ SPORTS_KEYWORDS = {
     "chiefs", "eagles", "cowboys", "49ers", "ravens", "bills",
     "yankees", "dodgers", "braves", "astros", "mets", "red sox",
     "spread", "over/under", "o/u", "moneyline",
-    # Esports
     "counter-strike", "csgo", "cs2", "dota", "dota2", "dota 2",
     "league of legends", "lol", "valorant", "overwatch",
     "esports", "e-sports", "bo1", "bo3", "bo5",
     "fnatic", "navi", "g2", "faze", "cloud9", "team liquid",
     "major tournament", "esl", "blast", "iem",
-    # Soccer/Football
     "marseille", "psg", "barcelona", "real madrid", "manchester",
     "liverpool", "arsenal", "chelsea", "tottenham", "juventus",
     "bayern", "inter milan", "ac milan", "atletico",
-    # Entertainment / Pop Culture / Music / TV — NO GUESSING
     "streamed", "streaming", "spotify", "billboard", "album", "song",
     "box office", "movie", "film", "oscar", "emmy", "grammy", "golden globe",
     "netflix", "disney", "hbo", "youtube", "tiktok", "views",
@@ -77,7 +95,6 @@ SPORTS_KEYWORDS = {
     "book sales", "bestseller", "new york times list",
     "baby name", "gender reveal", "wedding", "divorce",
     "influencer", "podcast", "twitch", "content creator",
-    # Random guessing markets — no data edge
     "coin flip", "dice roll", "random", "lottery", "powerball",
     "mega millions", "roulette", "casino",
     "weather record", "hottest day", "coldest day",
@@ -86,80 +103,93 @@ SPORTS_KEYWORDS = {
     "eurovision",
 }
 
-# === Preferred categories — prioritize these ===
 PREFERRED_KEYWORDS = {
     "bitcoin", "btc", "ethereum", "eth", "solana", "sol", "crypto",
     "xrp", "dogecoin", "doge", "cardano", "ada", "polygon", "matic",
     "defi", "nft", "blockchain", "token", "coin", "altcoin",
     "binance", "coinbase", "sec crypto", "etf",
     "up or down", "5 minutes", "15 minutes", "1 day",
-    "fed", "interest rate", "inflation", "gdp", "tariff", "trade war",
-    "trump", "biden", "congress", "senate", "election", "geopolitical",
-    "iran", "russia", "china", "ukraine", "nato", "ceasefire",
-    "climate", "hurricane", "earthquake", "wildfire", "temperature",
 }
 
-# === Edge / EV Thresholds ===
-MIN_EDGE = 0.05                    # 5% minimum edge for non-crypto
-MIN_EDGE_CRYPTO = 0.03             # 3% for crypto — need real signal, not noise
-MIN_EV_PER_DOLLAR = 0.01           # $0.01 minimum EV per dollar
+# === Edge Thresholds ===
+# Math: with $35 bankroll and $5 min bet, each trade is ~14% of bankroll.
+# Need high confidence to justify that concentration.
+# Claude gate + 5% edge = only trade when we're 55%+ sure on a 50/50 market.
+MIN_EDGE = 0.05                    # 5% edge minimum
+MIN_EDGE_CRYPTO = 0.05             # Same for crypto — Claude confirms every trade
+MIN_EV_PER_DOLLAR = 0.02           # $0.02 EV per dollar risked
 
 # === Position Sizing ===
-KELLY_FRACTION = 0.30              # 30% Kelly — balanced aggression
-MAX_POSITION_PCT = 0.15            # 15% max per trade
-MAX_OPEN_POSITIONS = 5             # More positions to catch more opportunities
-MIN_ORDER_SIZE_USD = 1.0
+# Math: $5 min bet / $35 bankroll = 14.3% per trade forced.
+# Kelly says ~20% for a 60/40 edge at even odds.
+# So $5 bets are actually near-optimal Kelly for moderate edges.
+KELLY_FRACTION = 0.40              # 40% Kelly — but floor is $5 anyway
+MAX_POSITION_PCT = 0.20            # Cap at $7 per trade (20% of $35)
+MAX_OPEN_POSITIONS = 3             # Max $15 at risk (43% of bankroll)
+MIN_ORDER_SIZE_USD = 1.0           # Will get bumped to $5 by Polymarket minimum
 
-# === Risk Management (Chan Drawdown) ===
-DD_THRESHOLD_HALF = 0.20           # Halve size at 20% drawdown
-DD_THRESHOLD_STOP = 0.30           # Stop trading at 30% drawdown
+# === Risk Management ===
+DD_THRESHOLD_HALF = 0.20           # Halve at 20% drawdown ($7 loss)
+DD_THRESHOLD_STOP = 0.35           # Stop at 35% drawdown ($12 loss)
 
 # === Stop Loss / Take Profit ===
-STOP_LOSS_PCT = 0.15               # 15% stop loss — gives positions room to breathe
-TAKE_PROFIT_PCT = 0.10             # 10% take profit
-TAKE_PROFIT_CRYPTO_PCT = 0.08      # 8% take profit for crypto — lock in gains
-TAKE_PROFIT_EDGE_MIN = 0.01        # Exit if edge drops below 1%
+# Math: 5-min binary markets resolve to $0 or $1. A position bought at
+# $0.50 can swing to $0.35 (-30%) and still win at $1.00.
+# Tight stops on 5-min markets = selling winners before resolution.
+# Let short-term markets resolve. Only stop out longer positions.
+STOP_LOSS_PCT = 0.40               # 40% — effectively let 5-min markets resolve
+TAKE_PROFIT_PCT = 0.30             # 30% take profit on longer markets
+TAKE_PROFIT_CRYPTO_PCT = 0.20      # 20% take profit — lock gains if price jumps
+TAKE_PROFIT_EDGE_MIN = 0.01
 
-# === Crypto Position Limits ===
-CRYPTO_MAX_POSITION_PCT = 0.20     # 20% of bankroll per crypto bet
-CRYPTO_CHECK_INTERVAL_SEC = 5      # Check positions every 5 seconds — speed matters
+# === Crypto Limits ===
+CRYPTO_MAX_POSITION_PCT = 0.20     # 20% max per crypto bet = ~$7
+CRYPTO_CHECK_INTERVAL_SEC = 5      # Check every 5 seconds
 
-# === Real-Time Edge Detection Thresholds ===
-MOMENTUM_THRESHOLD_STRONG = 0.15   # 0.15% move in 60 sec = strong signal
-MOMENTUM_THRESHOLD_MEDIUM = 0.10   # 0.10% move in 60 sec = medium signal
-MOMENTUM_WINDOW_SECONDS = 60       # Look at last 60 seconds of price action
-VOLUME_SPIKE_THRESHOLD = 2.0       # Volume must be 2x average to confirm move
+# === Momentum Thresholds ===
+# These determine when Binance data shows a real move vs noise.
+# 0.10% in 60s on BTC = ~$90 move = meaningful for 5-min markets.
+MOMENTUM_THRESHOLD_STRONG = 0.15   # 0.15% in 60s = strong
+MOMENTUM_THRESHOLD_MEDIUM = 0.10   # 0.10% in 60s = medium
+MOMENTUM_WINDOW_SECONDS = 60
+VOLUME_SPIKE_THRESHOLD = 2.0       # 2x avg volume confirms move
 
-# === Order Book / Whale Detection Thresholds ===
-ORDERBOOK_IMBALANCE_THRESHOLD = 0.60  # 60% bid ratio = bullish imbalance
-LARGE_TRADE_MULTIPLIER = 5            # Trade > 5x median = "large"
-WHALE_NET_THRESHOLD = 2               # Net 2+ large buys = whale signal
-FUNDING_EXTREME_THRESHOLD = 0.0005    # 0.05% funding rate = extreme
+# === Order Book / Whale Detection ===
+ORDERBOOK_IMBALANCE_THRESHOLD = 0.60
+LARGE_TRADE_MULTIPLIER = 5
+WHALE_NET_THRESHOLD = 2
+FUNDING_EXTREME_THRESHOLD = 0.0005
 
 # === Daily Loss Limit ===
-DAILY_LOSS_PER_10 = 2.0            # Max $2 loss per $10 bankroll
-DAILY_LOSS_LIMIT_PCT = 0.10        # 10% daily loss = stop trading for the day
+# Math: with $35, max daily loss = $7 (20% of bankroll).
+# Survive bad days so you can trade tomorrow.
+DAILY_LOSS_PER_10 = 2.0            # $2 per $10 = $7/day max loss
+DAILY_LOSS_LIMIT_PCT = 0.20        # 20% daily loss = stop
 
-# === Rolling Win Rate (Simons) ===
-WIN_RATE_WINDOW = 30               # Last 30 trades (more data since we trade often)
-WIN_RATE_THRESHOLD = 0.55          # Halve size below 55%
-MIN_TRADES_FOR_SIGNAL = 10         # Need 10 trades before adjusting
+# === Rolling Win Rate ===
+WIN_RATE_WINDOW = 20
+WIN_RATE_THRESHOLD = 0.45          # Halve size below 45% win rate
+MIN_TRADES_FOR_SIGNAL = 5          # Need 5 trades before adjusting
 
-# === Correlation Filter (Simons) ===
-CORRELATION_THRESHOLD = 0.60       # Skip if keyword overlap > 60%
+# === Correlation Filter ===
+CORRELATION_THRESHOLD = 0.60
 
-# === Long-Shot Bias (Taleb) ===
-LONGSHOT_LOW = 0.05                # Apply correction above this price
-LONGSHOT_HIGH = 0.20               # Apply correction below this price
-LONGSHOT_CORRECTION = 0.0          # DISABLED — not relevant for crypto
+# === Long-Shot Bias ===
+LONGSHOT_LOW = 0.05
+LONGSHOT_HIGH = 0.20
+LONGSHOT_CORRECTION = 0.0          # Disabled for crypto
 
 # === Claude AI ===
-MAX_CLAUDE_CALLS = 20              # Claude confirms each trade — fast reasoning on momentum data
-CLAUDE_MODEL = "claude-sonnet-4-6" # Fast + smart
-CLAUDE_MAX_TOKENS = 300            # Short responses only — yes/no + reasoning
+# Claude is the GATE — every trade must be approved.
+# Using Sonnet for speed + intelligence.
+CLAUDE_MODEL = "claude-sonnet-4-6"
+MAX_CLAUDE_CALLS = 20
+CLAUDE_MAX_TOKENS = 300
 
 # === Order Execution ===
-PRICE_IMPROVEMENT = 0.01           # 1 cent — speed matters but preserve edge
+# Math: 1 cent improvement on a $0.50 market = 2% edge cost.
+# With 5% edge, that's 40% of our edge gone. Use 0 for limit orders.
+PRICE_IMPROVEMENT = 0.01           # 1 cent — minimal edge sacrifice
 
 # === Database ===
 DB_PATH = "polybot.db"
