@@ -816,6 +816,18 @@ def main():
         except Exception as e:
             print(f"[WARN] Failed to cancel orders: {e}")
 
+        # Clean up ghost trades in DB — mark unfilled orders as cancelled
+        db_open = database.get_open_trades()
+        live_positions = trader.get_positions()
+        live_tokens = {p.get("asset", "") for p in (live_positions or []) if float(p.get("size", 0)) > 0}
+        cleaned = 0
+        for t in db_open:
+            if t["token_id"] not in live_tokens and t.get("order_id") != "imported":
+                database.update_trade_result(t["id"], t["entry_price"], 0.0, 0.0, "cancelled")
+                cleaned += 1
+        if cleaned:
+            print(f"[INFO] Cleaned {cleaned} ghost trades from DB (never filled)")
+
         # Get initial balance AND positions for true total equity
         bankroll = trader.get_balance()
         print(f"[INFO] Cash balance: ${bankroll:.2f}")
