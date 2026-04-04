@@ -49,7 +49,7 @@ MAX_MARKETS_PER_CYCLE = 50
 # === Market Filters ===
 MIN_VOLUME = 5
 MIN_LIQUIDITY = 50
-MAX_DAYS_TO_RESOLUTION = 1         # Only short-term crypto markets
+MAX_DAYS_TO_RESOLUTION = 7         # Include 5-min, 15-min, 1-hour, and daily markets
 
 # === Arbitrage Settings ===
 MIN_ARB_PROFIT = 0.005
@@ -149,8 +149,8 @@ CRYPTO_CHECK_INTERVAL_SEC = 5      # Check every 5 seconds
 # === Momentum Thresholds ===
 # These determine when Binance data shows a real move vs noise.
 # 0.10% in 60s on BTC = ~$90 move = meaningful for 5-min markets.
-MOMENTUM_THRESHOLD_STRONG = 0.15   # 0.15% in 60s = strong
-MOMENTUM_THRESHOLD_MEDIUM = 0.10   # 0.10% in 60s = medium
+MOMENTUM_THRESHOLD_STRONG = 0.08   # 0.08% in 60s = strong
+MOMENTUM_THRESHOLD_MEDIUM = 0.04   # 0.04% in 60s = medium (catches off-peak moves)
 MOMENTUM_WINDOW_SECONDS = 60
 VOLUME_SPIKE_THRESHOLD = 2.0       # 2x avg volume confirms move
 
