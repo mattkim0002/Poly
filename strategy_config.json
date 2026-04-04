@@ -1,0 +1,64 @@
+{
+  "updated_at": "2026-04-04T00:00:00Z",
+  "updated_by": "default",
+  "regime": "trending",
+  "signal_combos": {
+    "volume_spike+accelerating+whale": {
+      "min_edge": 0.04,
+      "kelly_mult": 1.0,
+      "note": "Triple confirmation — highest conviction"
+    },
+    "volume_spike+accelerating+orderbook_imbalance": {
+      "min_edge": 0.04,
+      "kelly_mult": 1.0,
+      "note": "Strong momentum with book support"
+    },
+    "volume_spike+whale+orderbook_imbalance": {
+      "min_edge": 0.04,
+      "kelly_mult": 0.9,
+      "note": "Whale-driven with book confirmation"
+    },
+    "volume_spike+accelerating": {
+      "min_edge": 0.05,
+      "kelly_mult": 0.8,
+      "note": "Volume-confirmed acceleration"
+    },
+    "volume_spike+orderbook_imbalance": {
+      "min_edge": 0.05,
+      "kelly_mult": 0.8,
+      "note": "Volume with order book tilt"
+    },
+    "volume_spike+whale": {
+      "min_edge": 0.05,
+      "kelly_mult": 0.8,
+      "note": "Volume with whale activity"
+    },
+    "whale+orderbook_imbalance": {
+      "min_edge": 0.06,
+      "kelly_mult": 0.7,
+      "note": "Whale + book — no volume spike, riskier"
+    },
+    "accelerating+whale+orderbook_imbalance": {
+      "min_edge": 0.05,
+      "kelly_mult": 0.8,
+      "note": "Acceleration with whale + book support"
+    }
+  },
+  "skip_combos": [],
+  "regime_thresholds": {
+    "atr_trending_min": 0.06,
+    "atr_choppy_max": 0.03,
+    "min_boosters_choppy": 4,
+    "min_boosters_trending": 2,
+    "disable_momentum_choppy": true
+  },
+  "risk_params": {
+    "max_position_pct": 0.20,
+    "kelly_fraction": 0.40,
+    "stop_loss_pct": 0.40,
+    "take_profit_pct": 0.20,
+    "max_open_positions": 3,
+    "daily_loss_limit_pct": 0.20,
+    "min_edge": 0.05
+  }
+}

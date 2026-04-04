@@ -13,10 +13,63 @@ in 60 seconds on Binance, the "Up" contract is still at ~50 cents.
 We buy before the market catches up.
 """
 
+import json
+import os
 import httpx
-import anthropic
 import config
 from utils.logger import log
+
+# Strategy config loaded from supervisor output
+_strategy_config = None
+_strategy_config_mtime = 0
+STRATEGY_CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "strategy_config.json")
+
+
+def _load_strategy_config() -> dict:
+    """Load strategy config from JSON, reload if file changed."""
+    global _strategy_config, _strategy_config_mtime
+    try:
+        mtime = os.path.getmtime(STRATEGY_CONFIG_PATH)
+        if _strategy_config is None or mtime > _strategy_config_mtime:
+            with open(STRATEGY_CONFIG_PATH) as f:
+                _strategy_config = json.load(f)
+            _strategy_config_mtime = mtime
+            log.info("Loaded strategy config (updated: %s)", _strategy_config.get("updated_at", "unknown"))
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        if _strategy_config is None:
+            log.warning("No strategy_config.json found, using defaults: %s", e)
+            _strategy_config = {}
+    return _strategy_config or {}
+
+
+def detect_regime(symbol: str) -> str:
+    """Detect market regime (trending vs choppy) using ATR from 5m candles.
+
+    Returns 'trending', 'choppy', or 'neutral'.
+    """
+    candles = _fetch_candles(symbol, "5m", 20)
+    if not candles or len(candles) < 10:
+        return "neutral"
+
+    # Calculate ATR as percentage of price
+    atr_values = []
+    for c in candles[-10:]:
+        tr = c["high"] - c["low"]
+        atr_pct = (tr / c["close"] * 100) if c["close"] > 0 else 0
+        atr_values.append(atr_pct)
+
+    avg_atr = sum(atr_values) / len(atr_values)
+
+    cfg = _load_strategy_config()
+    thresholds = cfg.get("regime_thresholds", {})
+    atr_trending = thresholds.get("atr_trending_min", 0.06)
+    atr_choppy = thresholds.get("atr_choppy_max", 0.03)
+
+    if avg_atr >= atr_trending:
+        return "trending"
+    elif avg_atr <= atr_choppy:
+        return "choppy"
+    return "neutral"
 
 BINANCE_SYMBOLS = {
     "bitcoin": "BTCUSDT",
@@ -374,75 +427,6 @@ def get_open_interest(symbol: str) -> dict | None:
         return None
 
 
-def claude_confirm_trade(
-    question: str,
-    symbol: str,
-    direction: str,
-    price_change_60s: float,
-    price_change_180s: float,
-    volume_ratio: float,
-    buy_pressure: float,
-    is_accelerating: bool,
-    boosters: list[str],
-    market_price: float,
-    our_probability: float,
-    signal_strength: str,
-) -> dict | None:
-    """Ask Claude to confirm or reject a trade based on momentum data.
-    
-    Returns {"approved": bool, "reason": str} or None if Claude unavailable.
-    Claude acts as a final gate — it sees all the raw data and decides
-    whether the signal is real or likely to reverse.
-    """
-    try:
-        client = anthropic.Anthropic()
-        
-        edge = our_probability - market_price
-        boosters_str = ", ".join(boosters) if boosters else "none"
-        
-        prompt = f"""You are a crypto trading analyst. A momentum-based bot detected a signal and wants to trade. Review the data and decide: APPROVE or REJECT.
-
-MARKET: {question}
-SIGNAL: {direction} ({signal_strength})
-PRICE MOVE: {price_change_60s:+.4f}% in 60s, {price_change_180s:+.4f}% in 180s
-VOLUME RATIO: {volume_ratio:.1f}x average
-BUY PRESSURE: {buy_pressure:.0%}
-ACCELERATING: {is_accelerating}
-CONFIRMING SIGNALS: {boosters_str}
-MARKET PRICE: {market_price:.3f} (${market_price:.2f})
-OUR PROBABILITY: {our_probability:.2f}
-EDGE: {edge:.1%}
-
-Rules:
-- REJECT if the move looks like noise (tiny price change, no volume confirmation)
-- REJECT if signals contradict each other (e.g. price up but sell pressure dominates)
-- REJECT if the edge is too thin (<5%) after accounting for spread
-- REJECT if the move has already played out (180s move >> 60s move = momentum fading)
-- APPROVE if multiple signals align and the edge is real
-
-Respond in exactly this format:
-DECISION: APPROVE or REJECT
-REASON: One sentence explaining why"""
-
-        response = client.messages.create(
-            model=config.CLAUDE_MODEL,
-            max_tokens=config.CLAUDE_MAX_TOKENS,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        
-        text = response.content[0].text.strip()
-        
-        # Parse response
-        approved = "APPROVE" in text.upper().split("\n")[0]
-        reason_line = [l for l in text.split("\n") if l.strip().startswith("REASON:")]
-        reason = reason_line[0].replace("REASON:", "").strip() if reason_line else text[:100]
-        
-        return {"approved": approved, "reason": reason}
-        
-    except Exception as e:
-        log.warning("Claude confirmation failed: %s", e)
-        return None
-
 
 def estimate_crypto_probability(question: str, market_price: float, outcome: str) -> dict | None:
     """Estimate probability using real-time momentum from Binance.
@@ -603,16 +587,65 @@ def estimate_crypto_probability(question: str, market_price: float, outcome: str
     # Cap probability at 0.85 (was 0.80 — more data sources justify higher confidence)
     base_prob = max(0.20, min(0.85, base_prob))
 
-    # === Confidence level ===
-    # Only trade on HIGH confidence — strong momentum + multiple confirmations
-    if signal_strength == "strong" and boosters >= 3:
-        confidence = "high"
-    elif signal_strength == "strong" and boosters >= 2:
-        confidence = "medium"
-    else:
-        log.info("Crypto SKIP '%s' — not enough confirmation (%s signal, %d boosters)",
-                 question[:40], signal_strength, boosters)
+    # === REGIME DETECTION ===
+    cfg = _load_strategy_config()
+    regime = detect_regime(symbol)
+    regime_thresholds = cfg.get("regime_thresholds", {})
+
+    # In choppy regime, require more boosters or skip entirely
+    if regime == "choppy" and regime_thresholds.get("disable_momentum_choppy", True):
+        log.info("Crypto SKIP '%s' — choppy regime, momentum disabled", question[:40])
         return None
+
+    min_boosters_needed = regime_thresholds.get(
+        f"min_boosters_{regime}",
+        regime_thresholds.get("min_boosters_trending", 2)
+    )
+
+    # === SIGNAL COMBO MATCHING ===
+    # Build the active signal set from booster_details
+    active_signals = set()
+    for detail in booster_details:
+        tag = detail.split(":")[0]
+        if tag.startswith("vol_spike"):
+            active_signals.add("volume_spike")
+        elif tag == "accelerating":
+            active_signals.add("accelerating")
+        elif tag.startswith("whale_") or tag.startswith("taker_"):
+            active_signals.add("whale")
+        elif tag.startswith("ob_") or tag.startswith("thin_"):
+            active_signals.add("orderbook_imbalance")
+        elif tag.startswith("funding_confirms"):
+            active_signals.add("funding_confirms")
+        elif tag.startswith("trend_"):
+            active_signals.add("trend_180s")
+
+    # Check against approved signal combos from config
+    signal_combos = cfg.get("signal_combos", {})
+    skip_combos = set(cfg.get("skip_combos", []))
+
+    best_combo = None
+    best_combo_key = None
+
+    for combo_key, combo_params in signal_combos.items():
+        if combo_key in skip_combos:
+            continue
+        required_signals = set(combo_key.split("+"))
+        if required_signals.issubset(active_signals):
+            # This combo is active — use the one with the most signals (most specific)
+            if best_combo is None or len(required_signals) > len(best_combo_key.split("+")):
+                best_combo = combo_params
+                best_combo_key = combo_key
+
+    # Fallback: if no combo matches but enough boosters, use defaults
+    if not best_combo:
+        if boosters >= min_boosters_needed and signal_strength == "strong":
+            best_combo = {"min_edge": cfg.get("risk_params", {}).get("min_edge", 0.05), "kelly_mult": 0.6}
+            best_combo_key = "fallback"
+        else:
+            log.info("Crypto SKIP '%s' — no approved signal combo (%s, %d boosters, regime=%s)",
+                     question[:40], "+".join(sorted(active_signals)) or "none", boosters, regime)
+            return None
 
     # === Optional TradingView confirmation ===
     tv = get_tradingview_analysis(symbol)
@@ -626,16 +659,13 @@ def estimate_crypto_probability(question: str, market_price: float, outcome: str
             booster_details.append(f"tv_1m:{rec}")
         else:
             tv_status = f"TV-disagrees({rec})"
-            # No penalty — TV lags, momentum is more reliable
 
     # === Apply direction ===
-    # base_prob is probability that the signal direction is correct
     if signal_up:
         up_prob = base_prob
     else:
         up_prob = 1.0 - base_prob
 
-    # Flip for outcome
     if is_up_outcome:
         prob = up_prob
     else:
@@ -644,25 +674,22 @@ def estimate_crypto_probability(question: str, market_price: float, outcome: str
     # Build reasoning
     direction = "UP" if signal_up else "DOWN"
     boosters_str = " | ".join(booster_details) if booster_details else "none"
-    reasoning = (f"{symbol}: ${current_price:.2f} [{tv_status}] | "
+    reasoning = (f"{symbol}: ${current_price:.2f} [{tv_status}] regime={regime} | "
                  f"60s:{price_change_60s:+.4f}% {direction} ({signal_strength}) | "
-                 f"boosters: {boosters_str}")
+                 f"combo: {best_combo_key} | boosters: {boosters_str}")
 
-    log.info("Crypto MOMENTUM for '%s' (%s): prob=%.2f conf=%s | %s",
-             question[:50], outcome, prob, confidence, reasoning)
+    log.info("Crypto MOMENTUM for '%s' (%s): prob=%.2f combo=%s regime=%s | %s",
+             question[:50], outcome, prob, best_combo_key, regime, reasoning)
 
-    # === DETERMINISTIC GATE (no Claude — too slow for crypto) ===
-    # Post Feb 18, 2026: taker orders execute instantly, Claude's 300-500ms
-    # latency means the window is already closed by the time we trade.
-    # Use deterministic rules instead:
+    # === DETERMINISTIC GATE ===
 
-    # Rule 1: Reject if momentum is fading (180s move >> 60s move)
+    # Rule 1: Reject if momentum is fading
     if abs(price_change_180s) > 0 and abs(price_change_60s) < abs(price_change_180s) * 0.3:
         log.info("REJECT '%s': momentum fading (60s=%.4f%% vs 180s=%.4f%%)",
                  question[:40], price_change_60s, price_change_180s)
         return None
 
-    # Rule 2: Reject if signals contradict (price up but sell pressure)
+    # Rule 2: Reject if signals contradict
     if signal_up and buy_pressure < 0.35:
         log.info("REJECT '%s': price up but sell pressure %.0f%%",
                  question[:40], buy_pressure * 100)
@@ -672,19 +699,24 @@ def estimate_crypto_probability(question: str, market_price: float, outcome: str
                  question[:40], buy_pressure * 100)
         return None
 
-    # Rule 3: Reject if edge is too thin after estimated fees
+    # Rule 3: Reject if edge too thin after fees (use combo-specific threshold)
     estimated_fee_pct = 0.072 * market_price * (1.0 - market_price)
     net_edge = abs(prob - market_price) - estimated_fee_pct
-    if net_edge < 0.03:
-        log.info("REJECT '%s': edge %.1f%% too thin after %.1f%% fee",
-                 question[:40], abs(prob - market_price) * 100, estimated_fee_pct * 100)
+    combo_min_edge = best_combo.get("min_edge", 0.05)
+    if net_edge < combo_min_edge:
+        log.info("REJECT '%s': net_edge %.1f%% < combo threshold %.1f%% (%s)",
+                 question[:40], net_edge * 100, combo_min_edge * 100, best_combo_key)
         return None
 
-    log.info("APPROVED (deterministic) '%s': %d boosters, net_edge=%.1f%%",
-             question[:40], boosters, net_edge * 100)
+    kelly_mult = best_combo.get("kelly_mult", 1.0)
+    log.info("APPROVED '%s': combo=%s net_edge=%.1f%% kelly_mult=%.1f regime=%s",
+             question[:40], best_combo_key, net_edge * 100, kelly_mult, regime)
 
     return {
         "probability": prob,
-        "confidence": confidence,
+        "confidence": "high" if boosters >= 3 else "medium",
         "reasoning": reasoning,
+        "combo": best_combo_key,
+        "kelly_mult": kelly_mult,
+        "regime": regime,
     }

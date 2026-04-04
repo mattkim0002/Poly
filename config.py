@@ -49,7 +49,7 @@ MAX_MARKETS_PER_CYCLE = 50
 # === Market Filters ===
 MIN_VOLUME = 5
 MIN_LIQUIDITY = 50
-MAX_DAYS_TO_RESOLUTION = 30        # Include crypto 5-min + geopolitics/politics (longer duration)
+MAX_DAYS_TO_RESOLUTION = 1          # Crypto 5-min markets only
 
 # === Arbitrage Settings ===
 MIN_ARB_PROFIT = 0.005

@@ -56,7 +56,8 @@ fi
 
 echo ""
 echo "Commands:"
-echo "  tail -f bot.log      # Watch bot logs"
-echo "  tail -f dash.log     # Watch dashboard logs"
-echo "  bash start.sh live   # Restart in live mode"
-echo "  bash start.sh paper  # Restart in paper mode"
+echo "  tail -f bot.log                # Watch bot logs"
+echo "  tail -f dash.log               # Watch dashboard logs"
+echo "  python3 supervisor.py          # Run daily strategy review (Claude)"
+echo "  bash start.sh live             # Restart in live mode"
+echo "  bash start.sh paper            # Restart in paper mode"
