@@ -48,9 +48,9 @@ def get_regime(symbol: str = "BTCUSDT") -> str:
     """Returns 'trending', 'choppy', or 'dead' based on last 10 five-minute candles.
 
     Uses ATR as volatility proxy + directional consistency.
-    - dead: ATR < 0.05% — no movement at all, skip
-    - trending: 7+/9 candles same direction — strong trend, trade it
-    - choppy: mixed candles — risky for momentum, skip
+    - dead: ATR < 0.01% — truly no movement, skip
+    - trending: 6+/9 candles same direction — trade it
+    - choppy: mixed candles — only trade with strong signals
     """
     try:
         resp = httpx.get(
@@ -62,7 +62,7 @@ def get_regime(symbol: str = "BTCUSDT") -> str:
         candles = resp.json()
     except Exception as e:
         log.error("Failed to fetch 5m candles for regime: %s", e)
-        return "choppy"  # Default to cautious
+        return "choppy"
 
     if not candles or len(candles) < 5:
         return "choppy"
@@ -77,12 +77,15 @@ def get_regime(symbol: str = "BTCUSDT") -> str:
     closes = [float(c[4]) for c in candles]
     ups = sum(1 for i in range(1, len(closes)) if closes[i] > closes[i - 1])
 
-    if atr_pct < 0.0005:
-        return "dead"
-    elif ups >= 7 or ups <= 2:
-        return "trending"
+    log.info("Regime check: %s=$%.0f ATR=$%.1f (%.4f%%) ups=%d/9",
+             symbol, price, atr, atr_pct * 100, ups)
+
+    if atr_pct < 0.0001:
+        return "dead"          # Truly flatlined (< 0.01%)
+    elif ups >= 6 or ups <= 3:
+        return "trending"      # 6+/9 same direction = good enough
     else:
-        return "choppy"
+        return "choppy"        # 4-5 ups out of 9 = no clear direction
 
 
 def get_candle_position() -> dict:

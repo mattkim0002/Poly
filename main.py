@@ -313,8 +313,8 @@ def run_cycle():
     candle = crypto_predictor.get_candle_position()
     print(f"[INFO] Regime: {regime} | Candle: {candle['phase']} ({candle['seconds_elapsed']}s in, {candle['seconds_remaining']}s left)")
 
-    if regime in ("choppy", "dead"):
-        print(f"[SKIP] Regime={regime} — no momentum trades this cycle")
+    if regime == "dead":
+        print(f"[SKIP] Regime=dead — market flatlined, no trades this cycle")
         # Still check existing positions for exits
         if not config.PAPER_TRADING:
             bankroll = trader.get_balance()
@@ -525,9 +525,11 @@ def run_cycle():
     for market in crypto_markets:
         trade = _evaluate_market(market, effective_bankroll)
         if trade:
-            # Mid-candle: only accept strong signals (high confidence / 3+ boosters)
-            if candle["phase"] == "mid_candle" and trade.get("signal", {}).get("confidence") != "high":
-                print(f"  [SKIP] Mid-candle, weak signal: {trade['question'][:40]}")
+            # Mid-candle or choppy regime: only accept strong signals
+            needs_strong = candle["phase"] == "mid_candle" or regime == "choppy"
+            if needs_strong and trade.get("signal", {}).get("confidence") != "high":
+                reason = f"mid-candle" if candle["phase"] == "mid_candle" else "choppy regime"
+                print(f"  [SKIP] {reason}, weak signal: {trade['question'][:40]}")
                 continue
             crypto_opportunities.append(trade)
             combo = trade.get("signal", {}).get("combo", "?")
