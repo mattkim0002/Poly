@@ -651,7 +651,7 @@ def estimate_crypto_probability(question: str, market_price: float, outcome: str
 
     # === REGIME DETECTION ===
     cfg = _load_strategy_config()
-    regime = detect_regime(symbol)
+    regime = get_regime(symbol)
     regime_thresholds = cfg.get("regime_thresholds", {})
 
     # In choppy regime, require more boosters or skip entirely
