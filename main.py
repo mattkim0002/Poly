@@ -36,6 +36,55 @@ def _is_junk_market(question: str) -> bool:
     return False
 
 
+def market_is_in_window(market: dict) -> bool:
+    """Strict entry filter for crypto 5-minute Up/Down markets.
+
+    Rules:
+    1. Must be a 5-minute crypto "Up or Down" market
+    2. Must resolve within the next 30 minutes
+    3. Must have at least 2 minutes until resolution (no last-second entries)
+
+    Returns True only if ALL three rules pass.
+    """
+    question = (market.get("question") or "").lower()
+    category = (market.get("category") or "").lower()
+
+    # Rule 1: must be a crypto "Up or Down" market
+    is_crypto_cat = "crypto" in category
+    is_up_down = "up or down" in question
+    mentions_coin = any(c in question for c in (
+        "bitcoin", "btc", "ethereum", "eth", "solana", "sol",
+        "xrp", "dogecoin", "doge", "cardano", "ada",
+    ))
+    if not (is_up_down and (is_crypto_cat or mentions_coin)):
+        print(f"  [SKIP] not 5m crypto up/down: '{question[:50]}'")
+        return False
+
+    # Rule 2 & 3: resolution time window
+    end_date = market.get("endDate") or market.get("end_date") or market.get("end_date_iso") or ""
+    if not end_date:
+        print(f"  [SKIP] no end_date: '{question[:50]}'")
+        return False
+
+    try:
+        end_dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        print(f"  [SKIP] bad end_date '{end_date}': '{question[:50]}'")
+        return False
+
+    minutes_left = (end_dt - datetime.now(timezone.utc)).total_seconds() / 60
+
+    if minutes_left < 2:
+        print(f"  [SKIP] {minutes_left:.1f}m left (<2min): '{question[:50]}'")
+        return False
+
+    if minutes_left > 30:
+        print(f"  [SKIP] {minutes_left:.0f}m left (>30min): '{question[:50]}'")
+        return False
+
+    return True
+
+
 def _daily_loss_limit(bankroll: float) -> float:
     """Max daily loss allowed based on bankroll."""
     return (bankroll / 10.0) * config.DAILY_LOSS_PER_10
@@ -130,24 +179,7 @@ def _evaluate_market(market: dict, bankroll: float) -> dict | None:
     if len(token_ids) < 2:
         return None
 
-    # Check if this is a crypto up/down market
-    if not crypto_predictor.is_crypto_updown_market(question):
-        return None
-
-    # Skip markets resolving in the past or within 5 minutes
-    end_date = market.get("end_date") or market.get("endDate") or ""
-    if end_date:
-        try:
-            end_dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
-            minutes_left = (end_dt - datetime.now(timezone.utc)).total_seconds() / 60
-            if minutes_left < 0:
-                print(f"  [SKIP] expired: '{question[:40]}'")
-                return None
-            if minutes_left < config.MIN_RESOLUTION_MINUTES:
-                print(f"  [SKIP] {minutes_left:.1f}m left: '{question[:40]}'")
-                return None
-        except (ValueError, TypeError):
-            pass
+    # market_is_in_window() already verified: crypto up/down, 2-30 min to resolution
 
     yes_token = token_ids[0]
     no_token = token_ids[1]
@@ -441,9 +473,10 @@ def run_cycle():
     # Skip markets we already have positions in
     markets = [m for m in markets if not any(tid in open_token_ids for tid in m.get("token_ids", []))]
 
-    # Crypto-only mode
-    crypto_markets = [m for m in markets if crypto_predictor.is_crypto_updown_market(m.get("question", ""))]
-    print(f"[INFO] {len(crypto_markets)} crypto up/down markets")
+    # Strict crypto 5-min window filter: crypto-only, resolves in 2-30 min
+    before_window = len(markets)
+    crypto_markets = [m for m in markets if market_is_in_window(m)]
+    print(f"[INFO] {len(crypto_markets)}/{before_window} markets pass window filter (5m crypto, 2-30min to resolution)")
 
     # --- Step 4: Check position limit ---
     if not config.PAPER_TRADING and len(open_trades) >= config.MAX_OPEN_POSITIONS:
