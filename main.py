@@ -143,8 +143,8 @@ def _evaluate_market(market: dict, bankroll: float) -> dict | None:
             if minutes_left < 0:
                 print(f"  [SKIP] expired: '{question[:40]}'")
                 return None
-            if minutes_left < 5:
-                print(f"  [SKIP] {minutes_left:.0f}m left: '{question[:40]}'")
+            if minutes_left < config.MIN_RESOLUTION_MINUTES:
+                print(f"  [SKIP] {minutes_left:.1f}m left: '{question[:40]}'")
                 return None
         except (ValueError, TypeError):
             pass

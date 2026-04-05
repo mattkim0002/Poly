@@ -62,10 +62,10 @@ def get_active_markets(limit: int = 100) -> list[dict]:
                 # Skip if already expired (past resolution)
                 if minutes_left < 0:
                     continue
-                # Skip if resolves too far out
-                if hasattr(config, "MAX_DAYS_TO_RESOLUTION"):
-                    if minutes_left > config.MAX_DAYS_TO_RESOLUTION * 1440:
-                        continue
+                # Skip if resolves too far out (crypto 5-min markets)
+                max_minutes = getattr(config, "MAX_RESOLUTION_MINUTES", 30)
+                if minutes_left > max_minutes:
+                    continue
             except (ValueError, TypeError):
                 pass
 

@@ -49,7 +49,8 @@ MAX_MARKETS_PER_CYCLE = 50
 # === Market Filters ===
 MIN_VOLUME = 5
 MIN_LIQUIDITY = 50
-MAX_DAYS_TO_RESOLUTION = 1          # Crypto 5-min markets only
+MAX_RESOLUTION_MINUTES = 30        # Crypto 5-min markets only
+MIN_RESOLUTION_MINUTES = 1.5       # Matches candle filter (entry_window + mid_candle)
 
 # === Arbitrage Settings ===
 MIN_ARB_PROFIT = 0.005
