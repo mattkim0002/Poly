@@ -126,7 +126,7 @@ MIN_EV_PER_DOLLAR = 0.02           # $0.02 EV per dollar risked
 # So $5 bets are actually near-optimal Kelly for moderate edges.
 KELLY_FRACTION = 0.40              # 40% Kelly — but floor is $5 anyway
 MAX_POSITION_PCT = 0.20            # Cap at $7 per trade (20% of $35)
-MAX_OPEN_POSITIONS = 3             # Max $15 at risk (43% of bankroll)
+MAX_OPEN_POSITIONS = 4             # Max $20 at risk (80% of bankroll)
 MIN_ORDER_SIZE_USD = 1.0           # Will get bumped to $5 by Polymarket minimum
 
 # === Risk Management ===
