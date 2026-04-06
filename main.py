@@ -16,7 +16,7 @@ sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
 import config
-from core import database, market_data, trader
+from core import database, market_data, trader, crypto_predictor
 from strategies.risk import calculate_r_multiple, expectancy, drawdown_multiplier, drawdown
 from strategies.arbitrage import scan_all_markets, execute_arb
 from strategies.ev import get_fee_rate, is_fee_free_market
@@ -289,6 +289,57 @@ def _print_portfolio(bankroll: float, open_trades: list[dict], recent_trades: li
     print()
 
 
+def _execute_momentum_trade(trade: dict, bankroll: float) -> bool:
+    """Execute a momentum trade with Kelly sizing."""
+    edge = trade["edge"]
+    price = trade["price"]
+    kelly_mult = trade.get("signal", {}).get("kelly_mult", 1.0)
+
+    size_dollars = bankroll * config.KELLY_FRACTION * edge * kelly_mult
+    max_size = config.CRYPTO_MAX_POSITION_PCT * bankroll
+    size_dollars = min(size_dollars, max_size)
+
+    if size_dollars < config.MIN_ORDER_SIZE_USD:
+        return False
+
+    shares = max(5, int(size_dollars / price)) if price > 0 else 5
+    cost = shares * price
+
+    print(f"\n  === MOMENTUM TRADE ===")
+    print(f"  Market:  {trade['question'][:50]}")
+    print(f"  Side:    {trade['outcome']} @ ${price:.3f}")
+    print(f"  Edge:    {edge:.1%}")
+    print(f"  Shares:  {shares} (${cost:.2f})")
+    print(f"  ======================")
+
+    order_id = trader.place_limit_order(
+        token_id=trade["token_id"],
+        price=price,
+        size=shares,
+        side="BUY",
+    )
+
+    if not order_id:
+        print(f"  [FAIL] Order failed")
+        return False
+
+    print(f"  [SUCCESS] Order placed: {order_id}")
+
+    database.record_trade(
+        market_id=trade["market_id"],
+        market_question=trade["question"],
+        token_id=trade["token_id"],
+        side="BUY", outcome=trade["outcome"],
+        entry_price=price, size=shares, cost=cost,
+        order_id=order_id,
+        claude_probability=trade["probability"],
+        market_probability=price,
+        edge=edge, kelly_frac=config.KELLY_FRACTION,
+        dd_mult=1.0, signal_mult=1.0,
+    )
+    return True
+
+
 # ──────────────────────────────────────────────────────────
 # MAIN CYCLE
 # ──────────────────────────────────────────────────────────
@@ -416,6 +467,67 @@ def run_cycle():
         else:
             print("[INFO] No snipe opportunities (nothing near-certain at a discount)")
 
+    # === STRATEGY 3: MOMENTUM (strict — trending + entry window + 3+ boosters) ===
+    if bankroll >= config.MIN_ORDER_SIZE_USD and trades_placed == 0:
+        regime = crypto_predictor.get_regime()
+        candle = crypto_predictor.get_candle_position()
+        print(f"[INFO] Strategy 3: Momentum check | regime={regime} candle={candle['phase']} ({candle['seconds_elapsed']}s in)")
+
+        if regime == "trending" and candle["phase"] == "entry_window":
+            # Only scan crypto up/down markets for momentum
+            crypto_markets = [m for m in markets
+                              if crypto_predictor.is_crypto_updown_market(m.get("question", ""))]
+
+            if crypto_markets:
+                print(f"[INFO] Evaluating {len(crypto_markets)} crypto markets (trending + entry window)...")
+                best_trade = None
+                best_edge = 0.0
+
+                for market in crypto_markets:
+                    question = market["question"]
+                    token_ids = market.get("token_ids", [])
+                    if len(token_ids) < 2:
+                        continue
+
+                    yes_token, no_token = token_ids[0], token_ids[1]
+                    yes_price = trader.get_midpoint(yes_token)
+                    no_price = trader.get_midpoint(no_token)
+                    if not yes_price or not no_price:
+                        continue
+
+                    # Check both sides
+                    for outcome, token_id, price in [("Yes", yes_token, yes_price), ("No", no_token, no_price)]:
+                        result = crypto_predictor.estimate_crypto_probability(question, price, outcome)
+                        if not result:
+                            continue
+                        # STRICT: only high confidence (3+ boosters)
+                        if result.get("confidence") != "high":
+                            continue
+                        edge = abs(result["probability"] - price)
+                        if edge > best_edge and edge >= 0.05:
+                            best_edge = edge
+                            best_trade = {
+                                "market_id": market["id"],
+                                "question": question,
+                                "token_id": token_id,
+                                "outcome": outcome,
+                                "price": price,
+                                "probability": result["probability"],
+                                "edge": edge,
+                                "signal": result,
+                            }
+
+                if best_trade:
+                    combo = best_trade["signal"].get("combo", "?")
+                    print(f"  MOMENTUM: {best_trade['question'][:50]} | {best_trade['outcome']} @ {best_trade['price']:.3f} | Edge: {best_trade['edge']:.1%} | combo={combo}")
+                    _execute_momentum_trade(best_trade, bankroll)
+                    trades_placed += 1
+                else:
+                    print("[INFO] No momentum signals pass strict filters")
+        else:
+            skip_reason = f"regime={regime}" if regime != "trending" else f"candle={candle['phase']}"
+            print(f"[INFO] Momentum skipped ({skip_reason})")
+
     if trades_placed:
         print(f"\n[INFO] {trades_placed} trade(s) placed this cycle")
 
@@ -493,6 +605,7 @@ def main():
     print(f"  Total:       ${total_equity:.2f}")
     print(f"  Strategy 1:  Arbitrage (Yes+No < $1.00)")
     print(f"  Strategy 2:  Resolution snipe ($0.90-$0.96)")
+    print(f"  Strategy 3:  Momentum (trending + entry window + 3+ signals)")
     print(f"  Claude API:  NONE (zero credit burn)")
     print(f"  Cycle:       {config.CYCLE_INTERVAL_SEC}s")
     print("=" * 55)
