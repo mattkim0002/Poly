@@ -490,7 +490,72 @@ def get_open_interest(symbol: str) -> dict | None:
 
 
 
-def estimate_crypto_probability(question: str, market_price: float, outcome: str) -> dict | None:
+def get_higher_timeframe_trend(symbol: str) -> dict:
+    """Check 1h and 4h trends to determine the dominant direction.
+
+    Only take momentum trades aligned with the bigger trend.
+    Returns {"direction": "up"/"down"/"sideways", "strength": float}
+    """
+    result = {"direction": "sideways", "strength": 0.0, "details": ""}
+
+    try:
+        # Fetch 4h candles (last 6 = 24 hours)
+        resp_4h = httpx.get(
+            "https://api.binance.com/api/v3/klines",
+            params={"symbol": symbol, "interval": "4h", "limit": 6},
+            timeout=10,
+        )
+        resp_4h.raise_for_status()
+        candles_4h = resp_4h.json()
+
+        # Fetch 1h candles (last 12 = 12 hours)
+        resp_1h = httpx.get(
+            "https://api.binance.com/api/v3/klines",
+            params={"symbol": symbol, "interval": "1h", "limit": 12},
+            timeout=10,
+        )
+        resp_1h.raise_for_status()
+        candles_1h = resp_1h.json()
+    except Exception as e:
+        log.debug("Failed to fetch HTF candles for %s: %s", symbol, e)
+        return result
+
+    if not candles_4h or not candles_1h:
+        return result
+
+    # 4h trend: compare first open to last close
+    open_4h = float(candles_4h[0][1])
+    close_4h = float(candles_4h[-1][4])
+    change_4h = (close_4h - open_4h) / open_4h * 100
+
+    # 1h trend: compare first open to last close
+    open_1h = float(candles_1h[0][1])
+    close_1h = float(candles_1h[-1][4])
+    change_1h = (close_1h - open_1h) / open_1h * 100
+
+    # Higher highs / higher lows check on 1h
+    closes_1h = [float(c[4]) for c in candles_1h]
+    higher_count = sum(1 for i in range(1, len(closes_1h)) if closes_1h[i] > closes_1h[i - 1])
+    lower_count = len(closes_1h) - 1 - higher_count
+
+    # Determine direction — both timeframes should agree
+    if change_4h > 0.1 and change_1h > 0.05 and higher_count >= 7:
+        direction = "up"
+        strength = min(abs(change_4h), 3.0) / 3.0  # 0-1 scale
+    elif change_4h < -0.1 and change_1h < -0.05 and lower_count >= 7:
+        direction = "down"
+        strength = min(abs(change_4h), 3.0) / 3.0
+    else:
+        direction = "sideways"
+        strength = 0.0
+
+    details = f"4h:{change_4h:+.2f}% 1h:{change_1h:+.2f}% ups:{higher_count}/11"
+    log.info("HTF trend %s: %s (strength=%.1f) | %s", symbol, direction, strength, details)
+
+    return {"direction": direction, "strength": strength, "details": details}
+
+
+
     """Estimate probability using real-time momentum from Binance.
 
     Momentum-based signal detection:
@@ -512,6 +577,9 @@ def estimate_crypto_probability(question: str, market_price: float, outcome: str
         return None
 
     is_up_outcome = outcome.lower() in ["yes", "up"]
+
+    # === CHECK HIGHER TIMEFRAME TREND ===
+    htf = get_higher_timeframe_trend(symbol)
 
     # === Get real-time momentum from Binance ===
     momentum = get_realtime_momentum(symbol)
@@ -541,6 +609,24 @@ def estimate_crypto_probability(question: str, market_price: float, outcome: str
 
     # Direction: positive change = UP signal, negative = DOWN signal
     signal_up = price_change_60s > 0
+
+    # === HIGHER TIMEFRAME ALIGNMENT ===
+    # Only trade in the direction of the 1h/4h trend
+    if htf["direction"] == "up" and not signal_up:
+        log.info("REJECT '%s': signal=DOWN but HTF trend=UP (%s)",
+                 question[:40], htf["details"])
+        return None
+    if htf["direction"] == "down" and signal_up:
+        log.info("REJECT '%s': signal=UP but HTF trend=DOWN (%s)",
+                 question[:40], htf["details"])
+        return None
+    if htf["direction"] == "sideways":
+        log.info("REJECT '%s': HTF trend=SIDEWAYS — no clear direction (%s)",
+                 question[:40], htf["details"])
+        return None
+
+    # HTF alignment confirmed — boost confidence
+    booster_details = [f"htf_{htf['direction']}:{htf['details']}"]
 
     # === Confidence boosters ===
     boosters = 0
