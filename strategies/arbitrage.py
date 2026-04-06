@@ -1,19 +1,13 @@
-"""Arbitrage scanner — finds crypto markets where Yes + No < $1.00.
+"""Arbitrage scanner — finds ANY markets where Yes + No < $1.00.
 
-Strategy (same as @0x8dxd):
-1. Scan all crypto 5-min up/down markets
-2. Check REAL orderbook prices (not midpoints — actual fillable asks)
-3. If best_ask(Yes) + best_ask(No) < $1.00 → guaranteed profit
+Strategy:
+1. Scan ALL active markets (crypto, politics, events, anything)
+2. Check REAL orderbook prices (actual fillable asks)
+3. If best_ask(Yes) + best_ask(No) < $1.00 after fees → guaranteed profit
 4. Buy both sides → wait for resolution → collect $1.00 per share pair
-5. Profit = $1.00 - cost_yes - cost_no (per share)
+5. Profit = $1.00 - cost_yes - cost_no - fee (per share)
 
-Polymarket fees: ~2% on winnings for takers, makers get rebates.
-So we need: Yes_ask + No_ask < ~$0.98 to profit after fees.
-
-With $35 bankroll:
-- 5 shares each side at $0.48 = $4.80 total → $5.00 payout = $0.20 profit
-- Can run 3-4 arbs simultaneously
-- Small but GUARANTEED profit per trade
+Geopolitics/world events = ZERO fees → best arb targets.
 """
 
 from core import trader

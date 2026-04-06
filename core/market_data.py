@@ -15,7 +15,7 @@ def get_active_markets(limit: int = 100) -> list[dict]:
     all_markets = []
 
     # Fetch multiple batches to get past the sports-dominated top results
-    for offset in range(0, 300, 100):
+    for offset in range(0, 500, 100):
         params = {
             "active": "true",
             "closed": "false",
@@ -52,19 +52,14 @@ def get_active_markets(limit: int = 100) -> list[dict]:
         if liquidity < config.MIN_LIQUIDITY:
             continue
 
-        # Skip markets already expired OR resolving too far out
+        # Skip markets already expired
         end_date = m.get("endDate") or m.get("end_date_iso")
         if end_date:
             from datetime import datetime, timezone
             try:
                 end_dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
                 minutes_left = (end_dt - datetime.now(timezone.utc)).total_seconds() / 60
-                # Skip if already expired (past resolution)
                 if minutes_left < 0:
-                    continue
-                # Skip if resolves too far out (crypto 5-min markets)
-                max_minutes = getattr(config, "MAX_RESOLUTION_MINUTES", 30)
-                if minutes_left > max_minutes:
                     continue
             except (ValueError, TypeError):
                 pass
@@ -108,13 +103,6 @@ def get_active_markets(limit: int = 100) -> list[dict]:
             "liquidity": liquidity,
             "end_date": m.get("endDate") or m.get("end_date_iso") or "",
         })
-
-    # Crypto-only: filter to Up/Down binary markets
-    def _is_crypto_updown(m):
-        q = (m.get("question", "") or "").lower()
-        return "up or down" in q
-
-    filtered = [m for m in filtered if _is_crypto_updown(m)]
 
     log.info("Fetched %d markets, %d pass filters", len(markets), len(filtered))
     return filtered

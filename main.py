@@ -1,8 +1,10 @@
-"""Polymarket Trading Bot — Crypto Sniper Mode
+"""Polymarket Trading Bot — Arb Scanner + Resolution Sniper
 
-Scans crypto binary markets for momentum-based trading opportunities.
-Uses real-time Binance data + Claude AI confirmation to detect edges
-before Polymarket reprices.
+Two strategies with real edge:
+1. ARBITRAGE: Buy Yes+No when total < $1.00 after fees → guaranteed profit
+2. RESOLUTION SNIPER: Buy near-certain outcomes priced below $0.95 → near-guaranteed profit
+
+No Claude API calls. No momentum. No coin flips. Pure math.
 """
 
 import sys
@@ -10,25 +12,24 @@ import time
 import traceback
 from datetime import date, datetime, timezone
 
-# Force unbuffered output so nohup/log files update in real time
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
 import config
-from core import database, market_data, trader, crypto_predictor
+from core import database, market_data, trader
 from strategies.risk import calculate_r_multiple, expectancy, drawdown_multiplier, drawdown
 from strategies.arbitrage import scan_all_markets, execute_arb
+from strategies.ev import get_fee_rate, is_fee_free_market
 from utils.logger import log
 
 _cycle_count = 0
 _daily_pnl = 0.0
 _daily_date = None
 _session_start_bankroll = 0.0
-_dead_tokens = set()  # Token IDs with no orderbook — stop retrying
+_dead_tokens = set()
 
 
 def _is_junk_market(question: str) -> bool:
-    """Filter out sports, entertainment, and random guessing markets."""
     q_lower = question.lower()
     for keyword in config.SPORTS_KEYWORDS:
         if keyword in q_lower:
@@ -36,579 +37,159 @@ def _is_junk_market(question: str) -> bool:
     return False
 
 
-def market_is_in_window(market: dict) -> bool:
-    """Strict entry filter for crypto 5-minute Up/Down markets.
+# ──────────────────────────────────────────────────────────
+# STRATEGY 2: RESOLUTION SNIPER
+# Find markets where outcome is near-certain but price < $0.95
+# Example: "Will BTC be above $50k on April 7?" and BTC is at $84k
+#          → Yes token trading at $0.92 → buy, collect $1.00 at resolution
+# ──────────────────────────────────────────────────────────
 
-    Rules:
-    1. Must be a 5-minute crypto "Up or Down" market
-    2. Must resolve within the next 30 minutes
-    3. Must have at least 2 minutes until resolution (no last-second entries)
+def scan_resolution_snipes(markets: list[dict]) -> list[dict]:
+    """Find near-certain outcomes priced below face value.
 
-    Returns True only if ALL three rules pass.
+    Looks for:
+    - Outcomes priced $0.90-$0.96 (market is ~sure but not $1.00 yet)
+    - OR outcomes priced $0.04-$0.10 on the OTHER side (same thing)
+
+    Profit = $1.00 - buy_price - fees.
     """
-    question = (market.get("question") or "").lower()
-    category = (market.get("category") or "").lower()
+    snipes = []
 
-    # Rule 1: must be a crypto "Up or Down" market
-    is_crypto_cat = "crypto" in category
-    is_up_down = "up or down" in question
-    mentions_coin = any(c in question for c in (
-        "bitcoin", "btc", "ethereum", "eth", "solana", "sol",
-        "xrp", "dogecoin", "doge", "cardano", "ada",
-    ))
-    if not (is_up_down and (is_crypto_cat or mentions_coin)):
-        print(f"  [SKIP] not 5m crypto up/down: '{question[:50]}'")
-        return False
+    for market in markets:
+        question = market.get("question", "")
+        token_ids = market.get("token_ids", [])
+        outcome_prices = market.get("outcome_prices", [])
 
-    # Rule 2 & 3: resolution time window
-    end_date = market.get("endDate") or market.get("end_date") or market.get("end_date_iso") or ""
-    if not end_date:
-        print(f"  [SKIP] no end_date: '{question[:50]}'")
-        return False
+        if len(token_ids) < 2 or len(outcome_prices) < 2:
+            continue
 
-    try:
-        end_dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
-    except (ValueError, TypeError):
-        print(f"  [SKIP] bad end_date '{end_date}': '{question[:50]}'")
-        return False
+        yes_price = outcome_prices[0]
+        no_price = outcome_prices[1] if len(outcome_prices) > 1 else (1.0 - yes_price)
 
-    minutes_left = (end_dt - datetime.now(timezone.utc)).total_seconds() / 60
+        # Check each side for near-certain pricing
+        for i, (token_id, price, outcome) in enumerate([
+            (token_ids[0], yes_price, "Yes"),
+            (token_ids[1], no_price, "No"),
+        ]):
+            # We want to buy tokens priced 0.90-0.96
+            # Below 0.90 = market isn't sure enough
+            # Above 0.96 = not enough profit margin
+            if price < 0.90 or price > 0.96:
+                continue
 
-    if minutes_left < 2:
-        print(f"  [SKIP] {minutes_left:.1f}m left (<2min): '{question[:50]}'")
-        return False
+            # Get REAL orderbook ask (what we can actually buy at)
+            book = trader.get_orderbook(token_id)
+            if not book or not book.get("asks"):
+                continue
 
-    if minutes_left > 30:
-        print(f"  [SKIP] {minutes_left:.0f}m left (>30min): '{question[:50]}'")
-        return False
+            real_ask = book["asks"][0]["price"]
+            ask_size = book["asks"][0]["size"]
 
-    return True
+            if real_ask > 0.96 or real_ask < 0.90:
+                continue
 
+            # Calculate profit after fees
+            fee_free = is_fee_free_market(question)
+            if fee_free:
+                fee_per_share = 0.0
+            else:
+                fee_rate = get_fee_rate(token_id)
+                fee_per_share = fee_rate * real_ask * (1.0 - real_ask)
 
-def _daily_loss_limit(bankroll: float) -> float:
-    """Max daily loss allowed based on bankroll."""
-    return (bankroll / 10.0) * config.DAILY_LOSS_PER_10
+            profit_per_share = 1.0 - real_ask - fee_per_share
 
+            if profit_per_share < 0.02:  # Need at least 2% profit
+                continue
 
-def _print_banner(bankroll: float):
-    if config.PAPER_TRADING:
-        mode = "PAPER TRADING"
-    elif config.DRY_RUN:
-        mode = "DRY RUN"
-    else:
-        mode = "LIVE TRADING"
-    print()
-    print("======================================================")
-    print("               CRYPTO SNIPER                          ")
-    print(f"  Mode:        {mode:<39}")
-    print(f"  Bankroll:    ${bankroll:<39.2f}")
-    print(f"  Min edge:    {config.MIN_EDGE_CRYPTO:.0%}{'':<35}")
-    print(f"  Kelly:       {config.KELLY_FRACTION:.0%} Kelly{'':<31}")
-    print(f"  Max per trade:{config.CRYPTO_MAX_POSITION_PCT:.0%} of bankroll{'':<25}")
-    print(f"  Max positions:{config.MAX_OPEN_POSITIONS:<32}")
-    print(f"  Cycle:       {config.CYCLE_INTERVAL_SEC}s{'':<36}")
-    print(f"  Strategy:    Signal combos + offline supervisor{'':<8}")
-    print("======================================================")
-    print()
-    if config.PAPER_TRADING:
-        print("=" * 50)
-        print("  *** PAPER TRADING MODE — NO REAL MONEY ***")
-        print("=" * 50)
-        print()
-    elif not config.DRY_RUN:
-        print("WARNING: LIVE TRADING MODE ENABLED")
-        print("Real money will be used.")
-        print()
+            profit_pct = profit_per_share / real_ask
 
-
-def _print_portfolio(bankroll: float, open_trades: list[dict], recent_trades: list[dict]):
-    global _daily_pnl
-
-    if config.PAPER_TRADING:
-        from core import paper_trader
-        print(paper_trader.paper_portfolio_summary())
-        print(f"  (Real account balance: ${bankroll:.2f})")
-        print()
-        return
-
-    # Fetch LIVE position values from Polymarket
-    live_positions = trader.get_positions()
-    live_pos_value = sum(float(p.get("currentValue", 0)) for p in (live_positions or []) if float(p.get("size", 0)) > 0)
-    num_positions = sum(1 for p in (live_positions or []) if float(p.get("size", 0)) > 0)
-    total_equity = bankroll + live_pos_value
-    daily_limit = _daily_loss_limit(total_equity)
-
-    session_profit = total_equity - _session_start_bankroll
-    session_pct = (session_profit / _session_start_bankroll * 100) if _session_start_bankroll > 0 else 0.0
-
-    print()
-    print("------------- PORTFOLIO ---------------")
-    print(f"  Session start:     ${_session_start_bankroll:<20.2f}")
-    print(f"  Cash:              ${bankroll:<20.2f}")
-    print(f"  Positions (live):  ${live_pos_value:<20.2f}")
-    print(f"  Total equity:      ${total_equity:<20.2f}")
-    print(f"  Session profit:    ${session_profit:<+20.2f}")
-    print(f"  Session growth:    {session_pct:<+20.1f}%")
-    print(f"  Open positions:    {num_positions:<21}")
-    print(f"  Available to trade:${bankroll:<20.2f}")
-    print(f"  Daily P&L:        ${_daily_pnl:<+20.2f}")
-    print(f"  Daily loss limit:  ${daily_limit:<20.2f}")
-
-    if recent_trades:
-        wins = sum(1 for t in recent_trades if (t.get("pnl") or 0) > 0)
-        losses = sum(1 for t in recent_trades if (t.get("pnl") or 0) <= 0)
-        win_rate = wins / len(recent_trades) if recent_trades else 0
-        exp = expectancy(recent_trades)
-        print(f"  Win rate:          {win_rate:.1%} ({wins}W / {losses}L of {len(recent_trades)} trades)")
-        print(f"  Expectancy:        {exp:<+20.2f}R")
-    else:
-        print(f"  Win rate:          No trades yet")
-
-    print("---------------------------------------")
-    print()
-
-
-def _evaluate_market(market: dict, bankroll: float) -> dict | None:
-    """Evaluate a crypto market for momentum-based trading opportunity.
-
-    Returns trade dict if edge found, None otherwise.
-    """
-    question = market["question"]
-    token_ids = market.get("token_ids", [])
-
-    if len(token_ids) < 2:
-        return None
-
-    # market_is_in_window() already verified: crypto up/down, 2-30 min to resolution
-
-    yes_token = token_ids[0]
-    no_token = token_ids[1]
-
-    # Get current market prices
-    yes_price = trader.get_midpoint(yes_token)
-    no_price = trader.get_midpoint(no_token)
-
-    if not yes_price or not no_price:
-        return None
-
-    # Evaluate YES outcome
-    yes_result = crypto_predictor.estimate_crypto_probability(question, yes_price, "Yes")
-    # Evaluate NO outcome
-    no_result = crypto_predictor.estimate_crypto_probability(question, no_price, "No")
-
-    # Take the better signal (higher edge)
-    best = None
-    best_edge = 0.0
-
-    if yes_result:
-        yes_edge = abs(yes_result["probability"] - yes_price)
-        if yes_edge > best_edge:
-            best_edge = yes_edge
-            best = {
-                "market_id": market["id"],
+            snipes.append({
                 "question": question,
-                "token_id": yes_token,
-                "outcome": "Yes",
-                "price": yes_price,
-                "probability": yes_result["probability"],
-                "edge": yes_edge,
-                "signal": yes_result,
-            }
+                "market_id": market.get("id", ""),
+                "token_id": token_id,
+                "outcome": outcome,
+                "ask_price": real_ask,
+                "ask_size": ask_size,
+                "profit_per_share": profit_per_share,
+                "profit_pct": profit_pct,
+                "fee_per_share": fee_per_share,
+                "fee_free": fee_free,
+            })
 
-    if no_result:
-        no_edge = abs(no_result["probability"] - no_price)
-        if no_edge > best_edge:
-            best_edge = no_edge
-            best = {
-                "market_id": market["id"],
-                "question": question,
-                "token_id": no_token,
-                "outcome": "No",
-                "price": no_price,
-                "probability": no_result["probability"],
-                "edge": no_edge,
-                "signal": no_result,
-            }
-
-    if not best or best_edge < config.MIN_EDGE_CRYPTO:
-        return None
-
-    return best
+    snipes.sort(key=lambda x: x["profit_pct"], reverse=True)
+    return snipes
 
 
-def _execute_trade(trade: dict, bankroll: float) -> bool:
-    """Execute a momentum-based trade with Kelly sizing."""
-    edge = trade["edge"]
-    probability = trade["probability"]
-
-    # In paper mode, use paper balance for sizing
-    if config.PAPER_TRADING:
-        from core import paper_trader
-        bankroll = paper_trader.paper_get_balance()
-
-    # Kelly position sizing with combo-specific multiplier
-    kelly_mult = trade.get("signal", {}).get("kelly_mult", 1.0)
-    size_dollars = bankroll * config.KELLY_FRACTION * edge * kelly_mult
-    # Cap at max position size
-    max_size = config.CRYPTO_MAX_POSITION_PCT * bankroll
-    size_dollars = min(size_dollars, max_size)
-
-    if size_dollars < config.MIN_ORDER_SIZE_USD:
-        print(f"  [SKIP] Size too small: ${size_dollars:.2f}")
+def execute_snipe(snipe: dict, bankroll: float) -> bool:
+    """Buy a near-certain outcome at a discount."""
+    max_spend = min(bankroll * 0.30, bankroll - 2.0)  # Keep $2 reserve
+    if max_spend < config.MIN_ORDER_SIZE_USD:
         return False
 
-    # Convert dollars to shares
-    price = trade["price"]
-    shares = int(size_dollars / price) if price > 0 else 0
-    if shares < 5:
-        shares = 5  # Polymarket minimum
+    price = snipe["ask_price"]
+    max_shares_by_bank = int(max_spend / price) if price > 0 else 0
+    max_shares_by_book = int(snipe["ask_size"])
+    shares = min(max_shares_by_bank, max_shares_by_book)
+    shares = max(shares, 5)  # Polymarket minimum
 
     cost = shares * price
+    expected_profit = shares * snipe["profit_per_share"]
 
-    prefix = "[PAPER] " if config.PAPER_TRADING else ""
-    print(f"\n  == {prefix}MOMENTUM TRADE ========================")
-    print(f"  Market:     {trade['question'][:45]}")
-    print(f"  Outcome:    {trade['outcome']}")
-    print(f"  Price:      ${price:.3f}")
-    print(f"  Probability:{probability:.2f}")
-    print(f"  Edge:       {edge:.1%}")
-    print(f"  Shares:     {shares}")
-    print(f"  Cost:       ${cost:.2f}")
-    print(f"  Signal:     {trade['signal'].get('reasoning', '')[:80]}")
-    print(f"  ============================================")
+    print(f"\n  === RESOLUTION SNIPE ===")
+    print(f"  Market:  {snipe['question'][:60]}")
+    print(f"  Side:    {snipe['outcome']} @ ${price:.3f}")
+    print(f"  Shares:  {shares}")
+    print(f"  Cost:    ${cost:.2f}")
+    print(f"  Profit:  ${expected_profit:.2f} ({snipe['profit_pct']:.1%})")
+    fee_str = "FREE" if snipe['fee_free'] else f"${snipe['fee_per_share']:.4f}/share"
+    print(f"  Fees:    {fee_str}")
+    print(f"  =========================")
 
-    if config.PAPER_TRADING:
-        from core import paper_trader
-        success = paper_trader.paper_buy(
-            market_id=trade["market_id"],
-            question=trade["question"],
-            token_id=trade["token_id"],
-            outcome=trade["outcome"],
-            price=price,
-            size=shares,
-            edge=edge,
-        )
-        return success
-
-    # Place BUY limit order (live trading only)
     order_id = trader.place_limit_order(
-        token_id=trade["token_id"],
+        token_id=snipe["token_id"],
         price=price,
         size=shares,
         side="BUY",
     )
 
     if not order_id:
-        print("  [FAIL] Order failed")
+        print(f"  [FAIL] Order failed")
         return False
 
     print(f"  [SUCCESS] Order placed: {order_id}")
 
-    # Record in database
-    dd_mult = drawdown_multiplier(bankroll, database.get_peak_equity())
     database.record_trade(
-        market_id=trade["market_id"],
-        market_question=trade["question"],
-        token_id=trade["token_id"],
+        market_id=snipe["market_id"],
+        market_question=f"[SNIPE] {snipe['question'][:80]}",
+        token_id=snipe["token_id"],
         side="BUY",
-        outcome=trade["outcome"],
+        outcome=snipe["outcome"],
         entry_price=price,
         size=shares,
         cost=cost,
         order_id=order_id,
-        claude_probability=probability,
+        claude_probability=0.0,
         market_probability=price,
-        edge=edge,
-        kelly_frac=config.KELLY_FRACTION,
-        dd_mult=dd_mult,
+        edge=snipe["profit_pct"],
+        kelly_frac=0.0,
+        dd_mult=1.0,
         signal_mult=1.0,
     )
-
     return True
 
 
-def run_cycle():
-    """Execute one trading cycle."""
-    global _cycle_count, _daily_pnl, _daily_date
-    _cycle_count += 1
-
-    # Reset daily P&L at midnight
-    today = date.today()
-    if _daily_date != today:
-        _daily_pnl = 0.0
-        _daily_date = today
-
-    print(f"\n[INFO] === CYCLE {_cycle_count} STARTING ===")
-
-    # --- Step 0: Regime check — skip entire cycle in choppy/dead ---
-    regime = crypto_predictor.get_regime()
-    candle = crypto_predictor.get_candle_position()
-    print(f"[INFO] Regime: {regime} | Candle: {candle['phase']} ({candle['seconds_elapsed']}s in, {candle['seconds_remaining']}s left)")
-
-    if regime == "dead":
-        print(f"[SKIP] Regime=dead — market flatlined, no trades this cycle")
-        # Still check existing positions for exits
-        if not config.PAPER_TRADING:
-            bankroll = trader.get_balance()
-            open_trades = database.get_open_trades()
-            if open_trades:
-                _check_existing_positions(open_trades)
-        return
-
-    # --- Step 1: Get account state ---
-    print("[INFO] Step 1: Checking account state...")
-    bankroll = trader.get_balance()
-
-    if config.PAPER_TRADING:
-        from core import paper_trader
-        paper_balance = paper_trader.paper_get_balance()
-        paper_positions = paper_trader.paper_get_open_positions()
-        paper_pos_value = sum(p["entry_price"] * p["size"] for p in paper_positions)
-        total_equity = paper_balance + paper_pos_value
-        live_pos_value = 0.0
-
-        print(f"[PAPER] Balance: ${paper_balance:.2f} | Open: {len(paper_positions)} | Total: ${total_equity:.2f} | (Real: ${bankroll:.2f})")
-
-        # Check paper positions for exit conditions
-        _check_existing_positions([])
-
-        # Paper drawdown check
-        state = paper_trader.load_paper_state()
-        peak = state["peak_balance"]
-        if peak > 0 and total_equity < peak:
-            dd_pct = (peak - total_equity) / peak
-            if dd_pct >= config.DD_THRESHOLD_STOP:
-                print(f"[PAPER] DRAWDOWN HALT: {dd_pct:.1%} exceeds {config.DD_THRESHOLD_STOP:.0%}")
-                _print_portfolio(bankroll, [], [])
-                return
-
-        # Paper position limit check
-        if len(paper_positions) >= config.MAX_OPEN_POSITIONS:
-            print(f"[PAPER] Max positions ({config.MAX_OPEN_POSITIONS}) reached, monitoring only")
-            _print_portfolio(bankroll, [], [])
-            return
-
-        # Use paper balance for trade sizing
-        effective_bankroll = paper_balance
-        open_token_ids = {p["token_id"] for p in paper_positions}
-        recent_trades = []
-        open_trades = []
-    else:
-        if bankroll <= 0:
-            print("[WARN] Zero balance — account may be empty or unreadable. Skipping cycle.")
-            return
-
-        peak_equity = database.get_peak_equity()
-        if peak_equity <= 0:
-            peak_equity = bankroll
-
-        recent_trades = database.get_recent_trades(config.WIN_RATE_WINDOW)
-        open_trades = database.get_open_trades()
-
-        # Fetch LIVE position values from Polymarket (not stale DB cost basis)
-        live_positions = trader.get_positions()
-        live_pos_value = sum(float(p.get("currentValue", 0)) for p in (live_positions or []) if float(p.get("size", 0)) > 0)
-        total_equity = bankroll + live_pos_value
-
-        print(f"[INFO] Cash: ${bankroll:.2f} | Positions: ${live_pos_value:.2f} | Total: ${total_equity:.2f} | Peak: ${peak_equity:.2f} | Open: {len(live_positions or [])}")
-
-        # Daily loss limit — hard stop at 10% of bankroll
-        daily_loss = _session_start_bankroll - total_equity  # How much we've lost today
-        daily_loss_limit = bankroll * config.DAILY_LOSS_LIMIT_PCT  # Hard stop at 10% daily loss
-        if daily_loss > daily_loss_limit:
-            print(f"  [HALT] Daily loss limit hit (${daily_loss:.2f} > ${daily_loss_limit:.2f}) — no new trades today")
-            _check_existing_positions(database.get_open_trades())
-            _record_equity(bankroll, live_pos_value)
-            _print_portfolio(bankroll, database.get_open_trades(), recent_trades)
-            return  # Skip Steps 3-6, only monitor existing positions
-
-        # --- Step 2: Check exit conditions ---
-        print("[INFO] Step 2: Checking exit conditions...")
-
-        # Drawdown check — use total equity (cash + positions), not just cash
-        dd_mult = drawdown_multiplier(total_equity, peak_equity)
-        dd_pct = drawdown(total_equity, peak_equity)
-
-        # Always check existing positions for stop loss / take profit
-        _check_existing_positions(open_trades)
-
-        if dd_mult == 0.0:
-            print(f"[STOP] DRAWDOWN HALT: {dd_pct:.1%} drawdown exceeds {config.DD_THRESHOLD_STOP:.0%} limit")
-            print(f"[INFO] Monitoring positions only — no new orders")
-            _record_equity(bankroll, live_pos_value)
-            _print_portfolio(bankroll, open_trades, recent_trades)
-            return
-
-        if dd_mult < 1.0:
-            print(f"[WARN] Drawdown at {dd_pct:.1%} — position sizes halved")
-
-        # Daily loss limit
-        daily_limit = _daily_loss_limit(total_equity)
-        if _daily_pnl <= -daily_limit:
-            print(f"[STOP] DAILY LOSS LIMIT: ${_daily_pnl:.2f} exceeds -${daily_limit:.2f}")
-            _record_equity(bankroll, live_pos_value)
-            _print_portfolio(bankroll, open_trades, recent_trades)
-            return
-
-        effective_bankroll = bankroll
-        open_token_ids = {t["token_id"] for t in open_trades}
-
-    # --- Step 3: Scan crypto markets ---
-    print("[INFO] Step 3: Scanning crypto markets...")
-    markets = market_data.get_active_markets(limit=config.MAX_MARKETS_PER_CYCLE)
-    if not markets:
-        print("[INFO] No markets pass filters")
-        if not config.PAPER_TRADING:
-            _record_equity(bankroll, live_pos_value)
-        _print_portfolio(bankroll, open_trades, recent_trades)
-        return
-
-    # Filter out junk (sports/entertainment)
-    before_filter = len(markets)
-    markets = [m for m in markets if not _is_junk_market(m.get("question", ""))]
-    junk_count = before_filter - len(markets)
-    if junk_count:
-        print(f"[INFO] Filtered {junk_count} junk markets")
-
-    # Skip markets we already have positions in
-    markets = [m for m in markets if not any(tid in open_token_ids for tid in m.get("token_ids", []))]
-
-    # Strict crypto 5-min window filter: crypto-only, resolves in 2-30 min
-    before_window = len(markets)
-    crypto_markets = [m for m in markets if market_is_in_window(m)]
-    print(f"[INFO] {len(crypto_markets)}/{before_window} markets pass window filter (5m crypto, 2-30min to resolution)")
-
-    # --- Step 4: Check position limit ---
-    if not config.PAPER_TRADING and len(open_trades) >= config.MAX_OPEN_POSITIONS:
-        print(f"[INFO] Max positions ({config.MAX_OPEN_POSITIONS}) reached, monitoring only")
-        _record_equity(bankroll, live_pos_value)
-        _print_portfolio(bankroll, open_trades, recent_trades)
-        return
-
-    # === STRATEGY 1: ARBITRAGE (guaranteed profit) ===
-    # Scan ALL crypto markets for Yes+No < $0.98 opportunities
-    print("[INFO] Step 4a: Scanning for arbitrage (guaranteed profit)...")
-    arb_opportunities = scan_all_markets(crypto_markets)
-    arb_trades_placed = 0
-
-    if arb_opportunities:
-        print(f"  Found {len(arb_opportunities)} arb opportunities!")
-        for arb in arb_opportunities[:2]:  # Max 2 arb trades per cycle
-            print(f"  ARB: {arb['question'][:45]} | Yes ${arb['yes_price']:.3f} + No ${arb['no_price']:.3f} = ${arb['total_cost']:.3f} | Profit: {arb['profit_pct']:.1%}")
-            if not config.PAPER_TRADING:
-                result = execute_arb(arb, effective_bankroll)
-                if result:
-                    arb_trades_placed += 1
-                    effective_bankroll -= result["total_cost"]
-                    # Record both sides in DB
-                    database.record_trade(
-                        market_id=result["market_id"],
-                        market_question=f"[ARB-YES] {result['question'][:80]}",
-                        token_id=result["yes_token"],
-                        side="BUY", outcome="Yes",
-                        entry_price=result["yes_price"],
-                        size=result["shares"],
-                        cost=result["shares"] * result["yes_price"],
-                        order_id=result["yes_order"],
-                        claude_probability=0.0, market_probability=result["yes_price"],
-                        edge=result["profit_pct"], kelly_frac=0.0,
-                        dd_mult=1.0, signal_mult=1.0,
-                    )
-                    database.record_trade(
-                        market_id=result["market_id"],
-                        market_question=f"[ARB-NO] {result['question'][:80]}",
-                        token_id=result["no_token"],
-                        side="BUY", outcome="No",
-                        entry_price=result["no_price"],
-                        size=result["shares"],
-                        cost=result["shares"] * result["no_price"],
-                        order_id=result["no_order"],
-                        claude_probability=0.0, market_probability=result["no_price"],
-                        edge=result["profit_pct"], kelly_frac=0.0,
-                        dd_mult=1.0, signal_mult=1.0,
-                    )
-            else:
-                print(f"  [PAPER] Would execute arb — skipping in paper mode")
-    else:
-        print("[INFO] No arb opportunities (spreads are tight)")
-
-    if arb_trades_placed:
-        print(f"[INFO] {arb_trades_placed} arb trade(s) placed (guaranteed profit)")
-
-    # === STRATEGY 2: MOMENTUM (directional bets with Claude gate) ===
-    # Only if we have bankroll left and position slots available
-    if effective_bankroll < 5:
-        print("[INFO] Not enough bankroll for momentum trades after arb")
-        if not config.PAPER_TRADING:
-            _record_equity(bankroll, live_pos_value)
-        _print_portfolio(bankroll, open_trades, recent_trades)
-        return
-
-    # --- CRYPTO: Deterministic momentum (signal combos from supervisor config) ---
-    # Check candle position — never enter in late_danger, require strong in mid_candle
-    if candle["phase"] == "late_danger":
-        print(f"[SKIP] Too late in candle ({candle['seconds_elapsed']}s elapsed) — waiting for next candle")
-        if not config.PAPER_TRADING:
-            _record_equity(bankroll, live_pos_value)
-        _print_portfolio(bankroll, open_trades, recent_trades)
-        return
-
-    print(f"[INFO] Step 4b: Evaluating crypto momentum ({candle['phase']}, {candle['seconds_remaining']}s left)...")
-    crypto_opportunities = []
-    for market in crypto_markets:
-        trade = _evaluate_market(market, effective_bankroll)
-        if trade:
-            # Mid-candle or choppy regime: only accept strong signals
-            needs_strong = candle["phase"] == "mid_candle" or regime == "choppy"
-            if needs_strong and trade.get("signal", {}).get("confidence") != "high":
-                reason = f"mid-candle" if candle["phase"] == "mid_candle" else "choppy regime"
-                print(f"  [SKIP] {reason}, weak signal: {trade['question'][:40]}")
-                continue
-            crypto_opportunities.append(trade)
-            combo = trade.get("signal", {}).get("combo", "?")
-            print(f"  CRYPTO SIGNAL: {trade['question'][:50]} | {trade['outcome']} @ {trade['price']:.3f} | Edge: {trade['edge']:.1%} | combo={combo} phase={candle['phase']}")
-
-    all_opportunities = crypto_opportunities
-
-    if not all_opportunities:
-        print("[INFO] No trading signals found")
-        if not config.PAPER_TRADING:
-            _record_equity(bankroll, live_pos_value)
-        _print_portfolio(bankroll, open_trades, recent_trades)
-        return
-
-    # Sort by edge descending — best opportunity first
-    all_opportunities.sort(key=lambda t: t["edge"], reverse=True)
-    best = all_opportunities[0]
-
-    print(f"\n[INFO] Step 5: Executing best trade (edge: {best['edge']:.1%})...")
-    _execute_trade(best, effective_bankroll)
-
-    # --- Step 7: Record & summarize ---
-    if not config.PAPER_TRADING:
-        _record_equity(bankroll, live_pos_value)
-    _print_portfolio(bankroll, open_trades, recent_trades)
-
+# ──────────────────────────────────────────────────────────
+# POSITION MANAGEMENT
+# ──────────────────────────────────────────────────────────
 
 def _check_existing_positions(open_trades: list[dict]):
-    """Check positions for stop loss, take profit, or resolution.
-
-    In paper mode, delegates to paper_trader.
-    In live mode, only manages positions that actually filled (exist on Polymarket).
-    """
+    """Check open positions for resolution or exit conditions."""
     global _daily_pnl
 
-    if config.PAPER_TRADING:
-        from core import paper_trader
-        paper_trader.paper_check_positions(trader.get_midpoint)
-        return
-
-    # Get REAL positions from Polymarket — these are shares we actually own
     live_positions = trader.get_positions()
     if not live_positions:
         return
 
-    # Build lookup: token_id -> live position data
     live_by_token = {}
     for p in live_positions:
         if float(p.get("size", 0)) > 0:
@@ -619,20 +200,16 @@ def _check_existing_positions(open_trades: list[dict]):
         entry_price = trade["entry_price"]
         question = trade.get("market_question", "")
 
-        # Skip tokens we already know are dead/resolved
         if token_id in _dead_tokens:
             continue
 
-        # ONLY manage positions we actually own on Polymarket
         live_pos = live_by_token.get(token_id)
         if not live_pos:
-            # Order never filled — mark as cancelled in DB, don't try to sell
             if trade.get("order_id") != "imported":
                 database.update_trade_result(trade["id"], entry_price, 0.0, 0.0, "cancelled")
-                print(f"  [CANCEL] Order never filled: '{question[:40]}'")
+                print(f"  [CANCEL] Never filled: '{question[:40]}'")
             continue
 
-        # Use real position size from Polymarket, not what we ordered
         real_size = float(live_pos.get("size", 0))
         avg_price = float(live_pos.get("avgPrice", entry_price))
         current_price = float(live_pos.get("curPrice", 0))
@@ -640,139 +217,244 @@ def _check_existing_positions(open_trades: list[dict]):
         if current_price <= 0:
             current_price = trader.get_midpoint(token_id)
         if current_price <= 0:
-            # No price available — mark as dead to stop retrying
             _dead_tokens.add(token_id)
-            print(f"  [DEAD] No price for token {token_id[:20]}... — skipping future checks")
             continue
 
-        # Use tighter take-profit for crypto 5-min markets
-        is_crypto = crypto_predictor.is_crypto_updown_market(question)
-        tp_threshold = config.TAKE_PROFIT_CRYPTO_PCT if is_crypto else config.TAKE_PROFIT_PCT
-
-        # Time-based early exit for crypto: lock gains or cut losses near candle end
-        if is_crypto and crypto_predictor.should_exit_early(avg_price, current_price, real_size):
-            pnl = (current_price - avg_price) * real_size
-            r_mult = calculate_r_multiple(avg_price, current_price, avg_price)
-            status = "won" if pnl > 0 else "lost"
-            database.update_trade_result(trade["id"], current_price, pnl, r_mult, status)
-            _daily_pnl += pnl
-            candle = crypto_predictor.get_candle_position()
-            print(f"  EARLY EXIT: '{question[:40]}' | PnL=${pnl:+.2f} | {candle['seconds_remaining']}s left")
-
-            if not config.DRY_RUN:
-                try:
-                    client = trader.get_client()
-                    client.cancel_all()
-                except Exception:
-                    pass
-                sell_price = max(0.01, min(0.99, round(current_price - 0.01, 2)))
-                trader.place_limit_order(token_id, sell_price, real_size, "SELL")
-            continue
-
-        # Take profit
-        gain_pct = (current_price - avg_price) / avg_price if avg_price > 0 else 0
-        if gain_pct >= tp_threshold:
-            pnl = (current_price - avg_price) * real_size
-            r_mult = calculate_r_multiple(avg_price, current_price, avg_price)
-            database.update_trade_result(trade["id"], current_price, pnl, r_mult, "won")
-            _daily_pnl += pnl
-            label = "CRYPTO TP" if is_crypto else "TAKE PROFIT"
-            print(f"  {label}: '{question[:40]}' | +{gain_pct:.0%} | PnL=${pnl:.2f}")
-
-            # Cancel pending orders to free balance, then sell
-            if not config.DRY_RUN:
-                try:
-                    client = trader.get_client()
-                    client.cancel_all()
-                except Exception:
-                    pass
-                sell_price = max(0.01, min(0.99, round(current_price - 0.01, 2)))
-                trader.place_limit_order(token_id, sell_price, real_size, "SELL")
-            continue
-
-        # Stop loss: exit if down past threshold
-        loss_pct = (avg_price - current_price) / avg_price if avg_price > 0 else 0
-        if loss_pct >= config.STOP_LOSS_PCT:
-            pnl = (current_price - avg_price) * real_size
-            r_mult = calculate_r_multiple(avg_price, current_price, avg_price)
-            database.update_trade_result(trade["id"], current_price, pnl, r_mult, "lost")
-            _daily_pnl += pnl
-            print(f"  STOP LOSS: '{question[:40]}' | PnL=${pnl:.2f}")
-
-            # Cancel pending orders to free balance, then sell
-            if not config.DRY_RUN:
-                try:
-                    client = trader.get_client()
-                    client.cancel_all()
-                except Exception:
-                    pass
-                trader.place_limit_order(token_id, current_price, real_size, "SELL")
-            continue
-
-        # Check if market resolved (price near 0 or 1)
+        # Market resolved → WIN
         if current_price >= 0.95:
-            pnl = (1.0 - entry_price) * trade["size"]
-            r_mult = calculate_r_multiple(entry_price, 1.0, entry_price)
+            pnl = (1.0 - avg_price) * real_size
+            r_mult = calculate_r_multiple(avg_price, 1.0, avg_price)
             database.update_trade_result(trade["id"], 1.0, pnl, r_mult, "won")
             _daily_pnl += pnl
-            print(f"  WIN: '{trade['market_question'][:40]}' | PnL=${pnl:+.2f} | R={r_mult:+.2f}")
+            print(f"  WIN: '{question[:40]}' | PnL=${pnl:+.2f}")
+
+        # Market resolved → LOSS
         elif current_price <= 0.05:
-            pnl = -entry_price * trade["size"]
-            r_mult = calculate_r_multiple(entry_price, 0.0, entry_price)
+            pnl = -avg_price * real_size
+            r_mult = calculate_r_multiple(avg_price, 0.0, avg_price)
             database.update_trade_result(trade["id"], 0.0, pnl, r_mult, "lost")
             _daily_pnl += pnl
-            print(f"  LOSS: '{trade['market_question'][:40]}' | PnL=${pnl:.2f} | R={r_mult:.2f}")
+            print(f"  LOSS: '{question[:40]}' | PnL=${pnl:.2f}")
+
+        # Stop loss for non-arb positions
+        elif "[ARB" not in question and "[SNIPE]" not in question:
+            loss_pct = (avg_price - current_price) / avg_price if avg_price > 0 else 0
+            if loss_pct >= config.STOP_LOSS_PCT:
+                pnl = (current_price - avg_price) * real_size
+                r_mult = calculate_r_multiple(avg_price, current_price, avg_price)
+                database.update_trade_result(trade["id"], current_price, pnl, r_mult, "lost")
+                _daily_pnl += pnl
+                print(f"  STOP LOSS: '{question[:40]}' | PnL=${pnl:.2f}")
+                if not config.DRY_RUN:
+                    trader.place_limit_order(token_id, current_price, real_size, "SELL")
 
 
 def _record_equity(bankroll: float, positions_value: float = 0.0):
-    """Snapshot current equity state."""
     total_eq = bankroll + positions_value
     peak = database.get_peak_equity()
     new_peak = max(peak, total_eq) if peak > 0 else total_eq
     dd = drawdown(total_eq, new_peak)
-
     database.record_equity_snapshot(
-        balance=bankroll,
-        positions_value=positions_value,
-        total_equity=total_eq,
-        drawdown=dd,
-        peak_equity=new_peak,
+        balance=bankroll, positions_value=positions_value,
+        total_equity=total_eq, drawdown=dd, peak_equity=new_peak,
     )
 
 
-def _cancel_all_open_orders():
-    """Cancel all existing open orders on startup to free up capital."""
-    print("[INFO] Cancelling all open orders to free capital...")
+def _print_portfolio(bankroll: float, open_trades: list[dict], recent_trades: list[dict]):
+    global _daily_pnl
+    live_positions = trader.get_positions()
+    live_pos_value = sum(float(p.get("currentValue", 0)) for p in (live_positions or []) if float(p.get("size", 0)) > 0)
+    num_positions = sum(1 for p in (live_positions or []) if float(p.get("size", 0)) > 0)
+    total_equity = bankroll + live_pos_value
+
+    session_profit = total_equity - _session_start_bankroll
+    session_pct = (session_profit / _session_start_bankroll * 100) if _session_start_bankroll > 0 else 0.0
+
+    print()
+    print("------------- PORTFOLIO ---------------")
+    print(f"  Cash:              ${bankroll:<20.2f}")
+    print(f"  Positions (live):  ${live_pos_value:<20.2f}")
+    print(f"  Total equity:      ${total_equity:<20.2f}")
+    print(f"  Session profit:    ${session_profit:<+20.2f}")
+    print(f"  Open positions:    {num_positions:<21}")
+    print(f"  Daily P&L:        ${_daily_pnl:<+20.2f}")
+
+    if recent_trades:
+        wins = sum(1 for t in recent_trades if (t.get("pnl") or 0) > 0)
+        losses = sum(1 for t in recent_trades if (t.get("pnl") or 0) <= 0)
+        exp = expectancy(recent_trades)
+        print(f"  Win rate:          {wins}/{wins+losses} ({wins/(wins+losses)*100:.0f}%)" if wins+losses > 0 else "")
+        print(f"  Expectancy:        {exp:<+20.2f}R")
+    print("---------------------------------------")
+    print()
+
+
+# ──────────────────────────────────────────────────────────
+# MAIN CYCLE
+# ──────────────────────────────────────────────────────────
+
+def run_cycle():
+    global _cycle_count, _daily_pnl, _daily_date
+    _cycle_count += 1
+
+    today = date.today()
+    if _daily_date != today:
+        _daily_pnl = 0.0
+        _daily_date = today
+
+    print(f"\n[INFO] === CYCLE {_cycle_count} ===")
+
+    bankroll = trader.get_balance()
+    if bankroll <= 0:
+        print("[WARN] Zero balance — skipping cycle")
+        return
+
+    # Check existing positions
+    open_trades = database.get_open_trades()
+    recent_trades = database.get_recent_trades(config.WIN_RATE_WINDOW)
+
+    live_positions = trader.get_positions()
+    live_pos_value = sum(float(p.get("currentValue", 0)) for p in (live_positions or []) if float(p.get("size", 0)) > 0)
+    num_positions = sum(1 for p in (live_positions or []) if float(p.get("size", 0)) > 0)
+    total_equity = bankroll + live_pos_value
+
+    print(f"[INFO] Cash: ${bankroll:.2f} | Positions: ${live_pos_value:.2f} ({num_positions}) | Total: ${total_equity:.2f}")
+
+    # Always check exits
+    if open_trades:
+        _check_existing_positions(open_trades)
+
+    # Daily loss limit
+    daily_loss = _session_start_bankroll - total_equity
+    if daily_loss > bankroll * config.DAILY_LOSS_LIMIT_PCT:
+        print(f"[HALT] Daily loss limit hit (${daily_loss:.2f})")
+        _record_equity(bankroll, live_pos_value)
+        _print_portfolio(bankroll, open_trades, recent_trades)
+        return
+
+    # Max positions check
+    if num_positions >= config.MAX_OPEN_POSITIONS:
+        print(f"[INFO] Max positions ({config.MAX_OPEN_POSITIONS}) reached — monitoring only")
+        _record_equity(bankroll, live_pos_value)
+        _print_portfolio(bankroll, open_trades, recent_trades)
+        return
+
+    # Fetch ALL markets
+    print("[INFO] Scanning all markets...")
+    markets = market_data.get_active_markets(limit=config.MAX_MARKETS_PER_CYCLE)
+    if not markets:
+        print("[INFO] No markets found")
+        _record_equity(bankroll, live_pos_value)
+        return
+
+    # Filter junk
+    markets = [m for m in markets if not _is_junk_market(m.get("question", ""))]
+
+    # Skip markets we already hold
+    open_token_ids = {t["token_id"] for t in open_trades}
+    markets = [m for m in markets if not any(tid in open_token_ids for tid in m.get("token_ids", []))]
+
+    print(f"[INFO] {len(markets)} markets to scan")
+
+    trades_placed = 0
+
+    # === STRATEGY 1: ARBITRAGE (guaranteed profit) ===
+    print("[INFO] Strategy 1: Scanning for arbitrage...")
+    arb_opportunities = scan_all_markets(markets)
+
+    if arb_opportunities:
+        print(f"  Found {len(arb_opportunities)} arb opportunities!")
+        for arb in arb_opportunities[:2]:
+            if bankroll < config.MIN_ORDER_SIZE_USD * 2:
+                break
+            print(f"  ARB: {arb['question'][:50]} | Yes ${arb['yes_price']:.3f} + No ${arb['no_price']:.3f} = ${arb['total_cost']:.3f} | Profit: {arb['profit_pct']:.1%}")
+            result = execute_arb(arb, bankroll)
+            if result:
+                trades_placed += 1
+                bankroll -= result["total_cost"]
+                database.record_trade(
+                    market_id=result["market_id"],
+                    market_question=f"[ARB-YES] {result['question'][:80]}",
+                    token_id=result["yes_token"],
+                    side="BUY", outcome="Yes",
+                    entry_price=result["yes_price"], size=result["shares"],
+                    cost=result["shares"] * result["yes_price"],
+                    order_id=result["yes_order"],
+                    claude_probability=0.0, market_probability=result["yes_price"],
+                    edge=result["profit_pct"], kelly_frac=0.0,
+                    dd_mult=1.0, signal_mult=1.0,
+                )
+                database.record_trade(
+                    market_id=result["market_id"],
+                    market_question=f"[ARB-NO] {result['question'][:80]}",
+                    token_id=result["no_token"],
+                    side="BUY", outcome="No",
+                    entry_price=result["no_price"], size=result["shares"],
+                    cost=result["shares"] * result["no_price"],
+                    order_id=result["no_order"],
+                    claude_probability=0.0, market_probability=result["no_price"],
+                    edge=result["profit_pct"], kelly_frac=0.0,
+                    dd_mult=1.0, signal_mult=1.0,
+                )
+    else:
+        print("[INFO] No arb opportunities (spreads are tight)")
+
+    # === STRATEGY 2: RESOLUTION SNIPER (near-certain at discount) ===
+    if bankroll >= config.MIN_ORDER_SIZE_USD:
+        print("[INFO] Strategy 2: Scanning for resolution snipes...")
+        snipes = scan_resolution_snipes(markets)
+
+        if snipes:
+            print(f"  Found {len(snipes)} snipe opportunities!")
+            for snipe in snipes[:2]:
+                if bankroll < config.MIN_ORDER_SIZE_USD:
+                    break
+                print(f"  SNIPE: {snipe['question'][:50]} | {snipe['outcome']} @ ${snipe['ask_price']:.3f} | Profit: {snipe['profit_pct']:.1%}")
+                if execute_snipe(snipe, bankroll):
+                    trades_placed += 1
+                    bankroll -= snipe["ask_price"] * 5  # Approximate cost
+        else:
+            print("[INFO] No snipe opportunities (nothing near-certain at a discount)")
+
+    if trades_placed:
+        print(f"\n[INFO] {trades_placed} trade(s) placed this cycle")
+
+    _record_equity(bankroll, live_pos_value)
+    _print_portfolio(bankroll, open_trades, recent_trades)
+
+
+# ──────────────────────────────────────────────────────────
+# STARTUP
+# ──────────────────────────────────────────────────────────
+
+def main():
+    global _session_start_bankroll
+    database.init_db()
+
+    # Cancel stale orders
+    print("[INFO] Cancelling stale open orders...")
     try:
         client = trader.get_client()
-        result = client.cancel_all()
-        print(f"[INFO] cancel_all response: {result}")
-
-        # Also mark them as cancelled in our database
-        db_open = database.get_open_trades()
-        for trade in db_open:
-            database.update_trade_result(trade["id"], trade["entry_price"], 0.0, 0.0, "cancelled")
-        if db_open:
-            print(f"[INFO] Marked {len(db_open)} DB trades as cancelled")
-
-        # Reset peak equity to current balance so drawdown calculation starts fresh
-        bankroll = trader.get_balance()
-        if bankroll > 0:
-            database.reset_peak_equity(bankroll)
-            print(f"[INFO] Peak equity reset to current balance: ${bankroll:.2f}")
-
-        return len(db_open)
+        client.cancel_all()
+        print("[INFO] All open orders cancelled")
     except Exception as e:
         print(f"[WARN] Failed to cancel orders: {e}")
-        return 0
 
+    # Clean ghost trades
+    db_open = database.get_open_trades()
+    live_positions = trader.get_positions()
+    live_tokens = {p.get("asset", "") for p in (live_positions or []) if float(p.get("size", 0)) > 0}
+    cleaned = 0
+    for t in db_open:
+        if t["token_id"] not in live_tokens and t.get("order_id") != "imported":
+            database.update_trade_result(t["id"], t["entry_price"], 0.0, 0.0, "cancelled")
+            cleaned += 1
+    if cleaned:
+        print(f"[INFO] Cleaned {cleaned} ghost trades from DB")
 
-def _sync_polymarket_positions():
-    """Fetch real positions from Polymarket and sync into local DB.
-    Returns total position value."""
+    # Sync existing positions
     positions = trader.get_positions()
-    total_value = 0.0
-    synced = 0
+    pos_value = 0.0
     for p in (positions or []):
         size = float(p.get("size", 0))
         if size <= 0:
@@ -781,100 +463,46 @@ def _sync_polymarket_positions():
         title = p.get("title", p.get("market", "unknown"))
         avg_price = float(p.get("avgPrice", p.get("price", 0.5)))
         cur_value = float(p.get("currentValue", 0))
-        total_value += cur_value
+        pos_value += cur_value
 
-        # Check if we already track this position in DB
-        open_trades = database.get_open_trades()
-        already_tracked = any(t["token_id"] == token_id for t in open_trades)
+        already_tracked = any(t["token_id"] == token_id for t in database.get_open_trades())
         if not already_tracked and token_id:
-            # Import existing Polymarket position into our DB
             database.record_trade(
                 market_id=p.get("conditionId", "imported"),
-                market_question=title,
-                token_id=token_id,
-                side="BUY",
-                outcome=p.get("outcome", "Yes"),
-                entry_price=avg_price,
-                size=size,
-                cost=size * avg_price,
-                order_id="imported",
-                claude_probability=0.0,
-                market_probability=avg_price,
-                edge=0.0,
-                kelly_frac=0.0,
-                dd_mult=1.0,
-                signal_mult=1.0,
+                market_question=title, token_id=token_id,
+                side="BUY", outcome=p.get("outcome", "Yes"),
+                entry_price=avg_price, size=size, cost=size * avg_price,
+                order_id="imported", claude_probability=0.0,
+                market_probability=avg_price, edge=0.0,
+                kelly_frac=0.0, dd_mult=1.0, signal_mult=1.0,
             )
-            synced += 1
-            print(f"  [SYNC] {title[:50]} | {size:.1f} shares @ ${avg_price:.3f} | Value: ${cur_value:.2f}")
+            print(f"  [SYNC] {title[:50]} | {size:.1f} shares @ ${avg_price:.3f}")
 
-    if synced > 0:
-        print(f"[INFO] Synced {synced} existing Polymarket positions into DB")
-    return total_value
+    bankroll = trader.get_balance()
+    total_equity = bankroll + pos_value
+    _session_start_bankroll = total_equity
 
+    database.reset_peak_equity(total_equity)
 
-def main():
-    """Main loop — momentum scanner running every cycle."""
-    global _session_start_bankroll
-    database.init_db()
-
-    if config.PAPER_TRADING:
-        from core import paper_trader
-        paper_balance = paper_trader.paper_get_balance()
-        _session_start_bankroll = paper_balance
-        # Still fetch real balance for reference display
-        bankroll = trader.get_balance()
-        print(f"[INFO] Real account balance: ${bankroll:.2f} (reference only)")
-        print(f"[INFO] Paper balance: ${paper_balance:.2f}")
-        _print_banner(paper_balance)
-    else:
-        # Cancel ALL unfilled orders on startup to free locked capital
-        print("[INFO] Cancelling stale open orders...")
-        try:
-            client = trader.get_client()
-            client.cancel_all()
-            print("[INFO] All open orders cancelled — capital freed")
-        except Exception as e:
-            print(f"[WARN] Failed to cancel orders: {e}")
-
-        # Clean up ghost trades in DB — mark unfilled orders as cancelled
-        db_open = database.get_open_trades()
-        live_positions = trader.get_positions()
-        live_tokens = {p.get("asset", "") for p in (live_positions or []) if float(p.get("size", 0)) > 0}
-        cleaned = 0
-        for t in db_open:
-            if t["token_id"] not in live_tokens and t.get("order_id") != "imported":
-                database.update_trade_result(t["id"], t["entry_price"], 0.0, 0.0, "cancelled")
-                cleaned += 1
-        if cleaned:
-            print(f"[INFO] Cleaned {cleaned} ghost trades from DB (never filled)")
-
-        # Get initial balance AND positions for true total equity
-        bankroll = trader.get_balance()
-        print(f"[INFO] Cash balance: ${bankroll:.2f}")
-        print("[INFO] Syncing existing Polymarket positions...")
-        positions_value = _sync_polymarket_positions()
-        total_equity = bankroll + positions_value
-        _session_start_bankroll = total_equity
-        print(f"[INFO] Total equity (cash + positions): ${total_equity:.2f}")
-        _print_banner(total_equity)
-
-        # Always reset peak equity to current total equity on startup
-        # This prevents stale high peaks from blocking all trades via DD=0.0
-        database.reset_peak_equity(total_equity)
-        print(f"[INFO] Peak equity reset to ${total_equity:.2f}")
-
-    print(f"[INFO] Bot started | Cycle interval: {config.CYCLE_INTERVAL_SEC}s")
-    print(f"[INFO] Markets: Crypto Up/Down (binary)")
-    print(f"[INFO] Strategy: Signal combos (supervisor config) + arb")
-    print(f"[INFO] Kelly: {config.KELLY_FRACTION:.0%} | Max position: {config.CRYPTO_MAX_POSITION_PCT:.0%} | Min edge: {config.MIN_EDGE_CRYPTO:.0%}")
+    print()
+    print("=" * 55)
+    print("          ARB SCANNER + RESOLUTION SNIPER")
+    print(f"  Mode:        {'LIVE TRADING' if not config.DRY_RUN else 'DRY RUN'}")
+    print(f"  Cash:        ${bankroll:.2f}")
+    print(f"  Positions:   ${pos_value:.2f}")
+    print(f"  Total:       ${total_equity:.2f}")
+    print(f"  Strategy 1:  Arbitrage (Yes+No < $1.00)")
+    print(f"  Strategy 2:  Resolution snipe ($0.90-$0.96)")
+    print(f"  Claude API:  NONE (zero credit burn)")
+    print(f"  Cycle:       {config.CYCLE_INTERVAL_SEC}s")
+    print("=" * 55)
     print()
 
     while True:
         try:
             run_cycle()
         except KeyboardInterrupt:
-            print("\n[INFO] Shutting down Crypto Sniper...")
+            print("\n[INFO] Shutting down...")
             break
         except Exception:
             print(f"[ERROR] Cycle failed:\n{traceback.format_exc()}")
@@ -883,7 +511,7 @@ def main():
         try:
             time.sleep(config.CYCLE_INTERVAL_SEC)
         except KeyboardInterrupt:
-            print("\n[INFO] Shutting down Crypto Sniper...")
+            print("\n[INFO] Shutting down...")
             break
 
 
