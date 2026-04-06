@@ -289,6 +289,40 @@ def _print_portfolio(bankroll: float, open_trades: list[dict], recent_trades: li
     print()
 
 
+def _claude_news_check(question: str, direction: str, edge: float) -> bool:
+    """Quick Claude check: any major news that overrides this momentum signal?
+
+    Only called on momentum trades (1-3/day max). Keeps prompt short to save credits.
+    Returns True if trade is approved, False if rejected.
+    """
+    try:
+        import anthropic
+        client = anthropic.Anthropic()
+
+        prompt = f"""Trade check. One word answer: APPROVE or REJECT.
+
+Market: {question}
+Signal: {direction}
+Edge: {edge:.1%}
+
+REJECT only if a major recent event (war, peace deal, regulation, hack, ETF) clearly contradicts this direction. Otherwise APPROVE.
+
+Answer APPROVE or REJECT, then 5 words max why."""
+
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=30,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = response.content[0].text.strip().upper()
+        approved = text.startswith("APPROVE")
+        print(f"  [CLAUDE] {text[:60]}")
+        return approved
+    except Exception as e:
+        print(f"  [CLAUDE] Failed ({e}) — approving by default")
+        return True
+
+
 def _execute_momentum_trade(trade: dict, bankroll: float) -> bool:
     """Execute a momentum trade with Kelly sizing."""
     edge = trade["edge"]
@@ -310,6 +344,13 @@ def _execute_momentum_trade(trade: dict, bankroll: float) -> bool:
     print(f"  Side:    {trade['outcome']} @ ${price:.3f}")
     print(f"  Edge:    {edge:.1%}")
     print(f"  Shares:  {shares} (${cost:.2f})")
+
+    # Claude news gate — reject if major event contradicts signal
+    direction = f"{trade['outcome']} (price {'up' if trade['outcome'] == 'Yes' else 'down'})"
+    if not _claude_news_check(trade["question"], direction, edge):
+        print(f"  [BLOCKED] Claude rejected — news contradicts signal")
+        return False
+
     print(f"  ======================")
 
     order_id = trader.place_limit_order(
