@@ -555,7 +555,7 @@ def get_higher_timeframe_trend(symbol: str) -> dict:
     return {"direction": direction, "strength": strength, "details": details}
 
 
-
+def estimate_crypto_probability(question: str, market_price: float, outcome: str) -> dict | None:
     """Estimate probability using real-time momentum from Binance.
 
     Momentum-based signal detection:
@@ -625,12 +625,10 @@ def get_higher_timeframe_trend(symbol: str) -> dict:
                  question[:40], htf["details"])
         return None
 
-    # HTF alignment confirmed — boost confidence
-    booster_details = [f"htf_{htf['direction']}:{htf['details']}"]
-
+    # HTF alignment confirmed
     # === Confidence boosters ===
     boosters = 0
-    booster_details = []
+    booster_details = [f"htf_{htf['direction']}:{htf['details']}"]
 
     # Volume spike confirms the move
     if volume_ratio > config.VOLUME_SPIKE_THRESHOLD:
