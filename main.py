@@ -829,8 +829,12 @@ def pnl_watcher_thread():
                 # Get current price
                 try:
                     current_price = trader.get_midpoint(token_id)
-                except Exception:
+                except Exception as e:
                     _dead_tokens.add(token_id)
+                    if "404" in str(e):
+                        # Market resolved/delisted — close in DB
+                        database.update_trade_result(trade["id"], entry_price, 0.0, 0.0, "cancelled")
+                        print(f"[P&L WATCHER] Dead token {token_id[:20]}... — marking closed")
                     continue
                 if not current_price or current_price <= 0:
                     continue
@@ -885,7 +889,13 @@ def pnl_watcher_thread():
 
                     if real_size > 0 and not config.DRY_RUN:
                         sell_price = max(0.01, min(0.99, round(current_price - 0.01, 2)))
-                        trader.place_limit_order(token_id, sell_price, real_size, "SELL")
+                        try:
+                            trader.place_limit_order(token_id, sell_price, real_size, "SELL")
+                        except Exception as e:
+                            if "400" in str(e) or "balance" in str(e).lower():
+                                print(f"[P&L WATCHER] CRITICAL — sell failed, insufficient balance, position still open")
+                                continue
+                            raise
 
                     # Update DB
                     pnl = (current_price - entry_price) * real_size
