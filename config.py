@@ -46,6 +46,12 @@ CHAIN_ID = 137  # Polygon
 CYCLE_INTERVAL_SEC = 15            # Fast scanning for momentum
 MAX_MARKETS_PER_CYCLE = 50
 
+# === Strategy Toggles ===
+ENABLE_THRESHOLD = True            # Strategy 0: mean-reversion on extreme prices
+ENABLE_ARB = True                  # Strategy 1: arbitrage (Yes+No < $1.00)
+ENABLE_SNIPE = True                # Strategy 2: resolution sniper
+ENABLE_MOMENTUM_INTRADAY = False   # Strategy 3: intraday Up/Down momentum (OFF)
+
 # === Market Filters ===
 MIN_VOLUME = 5
 MIN_LIQUIDITY = 50

@@ -681,62 +681,64 @@ def run_cycle():
     trades_placed = 0
 
     # === STRATEGY 0: THRESHOLD (mean-reversion on extreme prices) ===
-    print("[INFO] Strategy 0: Scanning for threshold opportunities...")
-    threshold_opps = scan_threshold_opportunities(markets)
-    if threshold_opps:
-        print(f"  Found {len(threshold_opps)} threshold opportunities!")
-        for opp in threshold_opps[:2]:
-            if bankroll < config.MIN_ORDER_SIZE_USD:
-                break
-            if execute_threshold_trade(opp, bankroll):
-                trades_placed += 1
-                bankroll -= opp["ask_price"] * 5
-    else:
-        print("[INFO] No threshold opportunities (no extreme prices)")
+    if config.ENABLE_THRESHOLD:
+        print("[INFO] Strategy 0: Scanning for threshold opportunities...")
+        threshold_opps = scan_threshold_opportunities(markets)
+        if threshold_opps:
+            print(f"  Found {len(threshold_opps)} threshold opportunities!")
+            for opp in threshold_opps[:2]:
+                if bankroll < config.MIN_ORDER_SIZE_USD:
+                    break
+                if execute_threshold_trade(opp, bankroll):
+                    trades_placed += 1
+                    bankroll -= opp["ask_price"] * 5
+        else:
+            print("[INFO] No threshold opportunities (no extreme prices)")
 
     # === STRATEGY 1: ARBITRAGE (guaranteed profit) ===
-    print("[INFO] Strategy 1: Scanning for arbitrage...")
-    arb_opportunities = scan_all_markets(markets)
+    if config.ENABLE_ARB:
+        print("[INFO] Strategy 1: Scanning for arbitrage...")
+        arb_opportunities = scan_all_markets(markets)
 
-    if arb_opportunities:
-        print(f"  Found {len(arb_opportunities)} arb opportunities!")
-        for arb in arb_opportunities[:2]:
-            if bankroll < config.MIN_ORDER_SIZE_USD * 2:
-                break
-            print(f"  ARB: {arb['question'][:50]} | Yes ${arb['yes_price']:.3f} + No ${arb['no_price']:.3f} = ${arb['total_cost']:.3f} | Profit: {arb['profit_pct']:.1%}")
-            result = execute_arb(arb, bankroll)
-            if result:
-                trades_placed += 1
-                bankroll -= result["total_cost"]
-                database.record_trade(
-                    market_id=result["market_id"],
-                    market_question=f"[ARB-YES] {result['question'][:80]}",
-                    token_id=result["yes_token"],
-                    side="BUY", outcome="Yes",
-                    entry_price=result["yes_price"], size=result["shares"],
-                    cost=result["shares"] * result["yes_price"],
-                    order_id=result["yes_order"],
-                    claude_probability=0.0, market_probability=result["yes_price"],
-                    edge=result["profit_pct"], kelly_frac=0.0,
-                    dd_mult=1.0, signal_mult=1.0,
-                )
-                database.record_trade(
-                    market_id=result["market_id"],
-                    market_question=f"[ARB-NO] {result['question'][:80]}",
-                    token_id=result["no_token"],
-                    side="BUY", outcome="No",
-                    entry_price=result["no_price"], size=result["shares"],
-                    cost=result["shares"] * result["no_price"],
-                    order_id=result["no_order"],
-                    claude_probability=0.0, market_probability=result["no_price"],
-                    edge=result["profit_pct"], kelly_frac=0.0,
-                    dd_mult=1.0, signal_mult=1.0,
-                )
-    else:
-        print("[INFO] No arb opportunities (spreads are tight)")
+        if arb_opportunities:
+            print(f"  Found {len(arb_opportunities)} arb opportunities!")
+            for arb in arb_opportunities[:2]:
+                if bankroll < config.MIN_ORDER_SIZE_USD * 2:
+                    break
+                print(f"  ARB: {arb['question'][:50]} | Yes ${arb['yes_price']:.3f} + No ${arb['no_price']:.3f} = ${arb['total_cost']:.3f} | Profit: {arb['profit_pct']:.1%}")
+                result = execute_arb(arb, bankroll)
+                if result:
+                    trades_placed += 1
+                    bankroll -= result["total_cost"]
+                    database.record_trade(
+                        market_id=result["market_id"],
+                        market_question=f"[ARB-YES] {result['question'][:80]}",
+                        token_id=result["yes_token"],
+                        side="BUY", outcome="Yes",
+                        entry_price=result["yes_price"], size=result["shares"],
+                        cost=result["shares"] * result["yes_price"],
+                        order_id=result["yes_order"],
+                        claude_probability=0.0, market_probability=result["yes_price"],
+                        edge=result["profit_pct"], kelly_frac=0.0,
+                        dd_mult=1.0, signal_mult=1.0,
+                    )
+                    database.record_trade(
+                        market_id=result["market_id"],
+                        market_question=f"[ARB-NO] {result['question'][:80]}",
+                        token_id=result["no_token"],
+                        side="BUY", outcome="No",
+                        entry_price=result["no_price"], size=result["shares"],
+                        cost=result["shares"] * result["no_price"],
+                        order_id=result["no_order"],
+                        claude_probability=0.0, market_probability=result["no_price"],
+                        edge=result["profit_pct"], kelly_frac=0.0,
+                        dd_mult=1.0, signal_mult=1.0,
+                    )
+        else:
+            print("[INFO] No arb opportunities (spreads are tight)")
 
     # === STRATEGY 2: RESOLUTION SNIPER (near-certain at discount) ===
-    if bankroll >= config.MIN_ORDER_SIZE_USD:
+    if config.ENABLE_SNIPE and bankroll >= config.MIN_ORDER_SIZE_USD:
         print("[INFO] Strategy 2: Scanning for resolution snipes...")
         snipes = scan_resolution_snipes(markets)
 
@@ -753,7 +755,7 @@ def run_cycle():
             print("[INFO] No snipe opportunities (nothing near-certain at a discount)")
 
     # === STRATEGY 3: MOMENTUM (strict — trending + entry window + 3+ boosters) ===
-    if bankroll >= config.MIN_ORDER_SIZE_USD and trades_placed == 0:
+    if config.ENABLE_MOMENTUM_INTRADAY and bankroll >= config.MIN_ORDER_SIZE_USD and trades_placed == 0:
         regime = crypto_predictor.get_regime()
         candle = crypto_predictor.get_candle_position()
         print(f"[INFO] Strategy 3: Momentum check | regime={regime} candle={candle['phase']} ({candle['seconds_elapsed']}s in)")
@@ -1032,10 +1034,10 @@ def main():
     print(f"  Cash:        ${bankroll:.2f}")
     print(f"  Positions:   ${pos_value:.2f}")
     print(f"  Total:       ${total_equity:.2f}")
-    print(f"  Strategy 0:  Threshold (YES<=28c / NO<=28c mean-reversion)")
-    print(f"  Strategy 1:  Arbitrage (Yes+No < $1.00)")
-    print(f"  Strategy 2:  Resolution snipe ($0.90-$0.96)")
-    print(f"  Strategy 3:  Momentum + Gap (HTF aligned, Haiku gate)")
+    print(f"  Strategy 0:  Threshold      {'ON' if config.ENABLE_THRESHOLD else 'OFF'}")
+    print(f"  Strategy 1:  Arbitrage      {'ON' if config.ENABLE_ARB else 'OFF'}")
+    print(f"  Strategy 2:  Sniper         {'ON' if config.ENABLE_SNIPE else 'OFF'}")
+    print(f"  Strategy 3:  Momentum       {'ON' if config.ENABLE_MOMENTUM_INTRADAY else 'OFF'}")
     print(f"  Cycle:       {config.CYCLE_INTERVAL_SEC}s")
     print("=" * 55)
     print()
