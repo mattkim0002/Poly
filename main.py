@@ -361,7 +361,7 @@ def _check_existing_positions(open_trades: list[dict]):
 
         if current_price <= 0:
             current_price = trader.get_midpoint(token_id)
-        if current_price <= 0:
+        if not current_price or current_price <= 0:
             _dead_tokens.add(token_id)
             continue
 
@@ -826,17 +826,14 @@ def pnl_watcher_thread():
                 if token_id in _dead_tokens:
                     continue
 
-                # Get current price
-                try:
-                    current_price = trader.get_midpoint(token_id)
-                except Exception as e:
+                # Get current price (None = dead/settled token)
+                current_price = trader.get_midpoint(token_id)
+                if current_price is None:
                     _dead_tokens.add(token_id)
-                    if "404" in str(e):
-                        # Market resolved/delisted — close in DB
-                        database.update_trade_result(trade["id"], entry_price, 0.0, 0.0, "cancelled")
-                        print(f"[P&L WATCHER] Dead token {token_id[:20]}... — marking closed")
+                    database.update_trade_result(trade["id"], entry_price, 0.0, 0.0, "closed")
+                    print(f"[P&L WATCHER] Dead token for '{question[:40]}' ({token_id[:20]}...) — marking position closed")
                     continue
-                if not current_price or current_price <= 0:
+                if current_price <= 0:
                     continue
 
                 # Calculate P&L percentage

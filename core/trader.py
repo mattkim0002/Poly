@@ -13,6 +13,7 @@ SIGNATURE_TYPE = 2  # POLY_GNOSIS_SAFE: trades through Polymarket proxy wallet
 PROXY_WALLET = "0xa1A623585f0D860c3156c8d2b6ADFFc066922c69"
 
 _client: ClobClient | None = None
+DEAD_TOKENS: set[str] = set()  # Tokens with no orderbook (settled/delisted)
 
 
 def get_client() -> ClobClient:
@@ -68,8 +69,10 @@ def get_price(token_id: str, side: str = "BUY") -> float:
         return 0.0
 
 
-def get_midpoint(token_id: str) -> float:
-    """Get midpoint price for a token."""
+def get_midpoint(token_id: str) -> float | None:
+    """Get midpoint price for a token. Returns None for dead/settled tokens."""
+    if token_id in DEAD_TOKENS:
+        return None
     client = get_client()
     try:
         mid = client.get_midpoint(token_id=token_id)
@@ -77,12 +80,18 @@ def get_midpoint(token_id: str) -> float:
             mid = mid.get("mid", 0)
         return float(mid)
     except Exception as e:
+        if "404" in str(e) and "No orderbook" in str(e):
+            DEAD_TOKENS.add(token_id)
+            log.info("[DEAD TOKEN] No orderbook for %s — marking as ignored", token_id[:20])
+            return None
         log.error("Failed to get midpoint for %s: %s", token_id, e)
         return 0.0
 
 
-def get_orderbook(token_id: str) -> dict:
-    """Get full orderbook for a token as a plain dict."""
+def get_orderbook(token_id: str) -> dict | None:
+    """Get full orderbook for a token. Returns None for dead/settled tokens."""
+    if token_id in DEAD_TOKENS:
+        return None
     client = get_client()
     try:
         book = client.get_order_book(token_id)
@@ -114,6 +123,10 @@ def get_orderbook(token_id: str) -> dict:
             "asks": _to_list(getattr(book, "asks", []) or []),
         }
     except Exception as e:
+        if "404" in str(e) and "No orderbook" in str(e):
+            DEAD_TOKENS.add(token_id)
+            log.info("[DEAD TOKEN] No orderbook for %s — marking as ignored", token_id[:20])
+            return None
         log.error("Failed to get orderbook for %s: %s", token_id, e)
         return {"bids": [], "asks": []}
 

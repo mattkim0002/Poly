@@ -37,7 +37,7 @@ def scan_arb_opportunity(market: dict) -> dict | None:
     yes_book = trader.get_orderbook(yes_token)
     no_book = trader.get_orderbook(no_token)
 
-    if not yes_book.get("asks") or not no_book.get("asks"):
+    if not yes_book or not no_book or not yes_book.get("asks") or not no_book.get("asks"):
         return None
 
     # Best ask = cheapest price we can BUY at
