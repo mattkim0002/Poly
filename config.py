@@ -47,15 +47,20 @@ CYCLE_INTERVAL_SEC = 15            # Fast scanning for momentum
 MAX_MARKETS_PER_CYCLE = 50
 
 # === Strategy Toggles ===
-ENABLE_THRESHOLD = False           # Strategy 0: OFF — mean-reversion loses on crypto trends
-ENABLE_ARB = True                  # Strategy 1: arbitrage (Yes+No < $1.00)
-ENABLE_SNIPE = True                # Strategy 2: resolution sniper
-ENABLE_MOMENTUM_INTRADAY = False   # Strategy 3: intraday Up/Down momentum (OFF)
+ENABLE_ARB = True                  # Strategy 1: crypto arb (Yes+No < $1.00)
+ENABLE_MOMENTUM_CLAUDE = True      # Strategy 2: momentum with Claude Sonnet gate
+ENABLE_SNIPE = False               # Strategy 3: resolution sniper (conservative, OFF by default)
+ENABLE_THRESHOLD = False           # DISABLED — mean-reversion loses on crypto trends
+ENABLE_MOMENTUM_INTRADAY = False   # DISABLED — experimental hourly/15-min markets
+
+# === Market Timeframe Filter ===
+# Only allow original 5-minute Up/Down markets from April 4 strategy
+ALLOWED_MARKET_DURATIONS = ["5 minutes"]  # Add "15 minutes", "hourly" to re-enable
 
 # === Market Filters ===
 MIN_VOLUME = 5
 MIN_LIQUIDITY = 50
-MAX_RESOLUTION_MINUTES = 30        # Crypto 5-min markets only
+MAX_RESOLUTION_MINUTES = 10        # Only 5-min crypto markets (with small buffer)
 MIN_RESOLUTION_MINUTES = 1.5       # Matches candle filter (entry_window + mid_candle)
 
 # === Arbitrage Settings ===

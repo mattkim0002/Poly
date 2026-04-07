@@ -1,10 +1,9 @@
-"""Polymarket Trading Bot — Arb Scanner + Resolution Sniper
+"""Polymarket Trading Bot — 5-Minute Crypto Markets
 
-Two strategies with real edge:
+Active strategies:
 1. ARBITRAGE: Buy Yes+No when total < $1.00 after fees → guaranteed profit
-2. RESOLUTION SNIPER: Buy near-certain outcomes priced below $0.95 → near-guaranteed profit
-
-No Claude API calls. No momentum. No coin flips. Pure math.
+2. MOMENTUM + CLAUDE GATE: Binance signals + Claude Sonnet approval required
+3. RESOLUTION SNIPER: Near-certain outcomes at $0.90-$0.96 (optional, off by default)
 """
 
 import sys
@@ -203,6 +202,36 @@ def _is_junk_market(question: str) -> bool:
         if keyword in q_lower:
             return True
     return False
+
+
+def _is_allowed_market_duration(question: str) -> bool:
+    """Only allow market durations listed in config.ALLOWED_MARKET_DURATIONS.
+
+    Blocks hourly, 15-minute, daily markets unless explicitly allowed.
+    """
+    q_lower = question.lower()
+    # Must be a crypto up/down market
+    if "up or down" not in q_lower:
+        return True  # Non-crypto markets pass through (arb/snipe handle all)
+    # Check if any allowed duration keyword is in the question
+    for duration in config.ALLOWED_MARKET_DURATIONS:
+        if duration.lower() in q_lower:
+            return True
+    return False
+
+
+def _get_active_strategies() -> list[str]:
+    """Return list of currently enabled strategy names."""
+    active = []
+    if config.ENABLE_ARB:
+        active.append("ARB")
+    if config.ENABLE_MOMENTUM_CLAUDE:
+        active.append("MOMENTUM_CLAUDE")
+    if config.ENABLE_SNIPE:
+        active.append("SNIPE")
+    if config.ENABLE_THRESHOLD:
+        active.append("THRESHOLD")
+    return active
 
 
 # ──────────────────────────────────────────────────────────
@@ -485,42 +514,47 @@ def _print_portfolio(bankroll: float, open_trades: list[dict], recent_trades: li
     print()
 
 
-NEWS_GATE_SYSTEM = """You are a fast risk filter for a Polymarket 5-minute crypto trading bot.
+NEWS_GATE_SYSTEM = """You are a risk filter for a Polymarket 5-minute crypto Up/Down trading bot.
 
-Your ONLY job: decide if it is SAFE or DANGEROUS to take the specific trade the bot is about to place,
-based on NEWS + BINANCE DATA.
+You receive raw data: coin, side (UP/DOWN), Polymarket price, Binance momentum (60s/180s price change,
+volume ratio, buy pressure, acceleration, 1h/4h trend), and orderbook imbalance.
 
-You MUST answer in a SHORT JSON object, nothing else:
+Your ONLY job: decide if the bot should APPROVE or REJECT this specific trade.
+
+Reply with ONLY this JSON, nothing else:
 
 {"ok_to_trade": true or false, "reason": "single short sentence", "confidence": "low|medium|high"}
 
 Rules:
-1. If there is STRONG bullish news for the coin and the bot wants to SHORT (bet DOWN), ok_to_trade = false.
-2. If there is STRONG bearish news and the bot wants to LONG (bet UP), ok_to_trade = false.
-3. If Binance 15-30 minute data shows a clean, high-volume trend AGAINST the trade direction, ok_to_trade = false.
-4. If there is NO clear news and signals are mixed or weak, default to ok_to_trade = false.
-5. ONLY set ok_to_trade = true when:
-   - No obvious strong news against the trade, AND
-   - Binance data supports the trade direction, AND
-   - There is no strong trend against it.
+1. If Binance 1h/4h trend is AGAINST the trade direction → ok_to_trade = false.
+2. If Binance 60s/180s momentum is AGAINST the trade direction → ok_to_trade = false.
+3. If volume ratio < 1.0 (no volume spike) → ok_to_trade = false.
+4. If buy pressure < 0.45 for UP trades or > 0.55 for DOWN trades → ok_to_trade = false.
+5. If signals are mixed, weak, or unclear → ok_to_trade = false.
+6. ONLY ok_to_trade = true when ALL of:
+   - Binance short-term momentum supports the trade direction
+   - Binance 1h and 4h trends are not against it
+   - Volume spike confirms the move (ratio >= 1.5)
+   - Buy pressure aligns with direction
+   - Edge >= 5%
 
-Be extremely conservative. When in doubt, set ok_to_trade = false.
-Never write anything outside the JSON. No prose, no markdown, just JSON."""
+Be extremely conservative. When in doubt, REJECT.
+Never write anything outside the JSON."""
 
 
 def _claude_news_check(question: str, direction: str, edge: float,
                        symbol: str = None, poly_price: float = 0.0) -> bool:
-    """Claude risk gate: check if news/data contradicts this momentum signal.
+    """Claude risk gate: sends all raw data to Sonnet, requires explicit APPROVE.
 
-    Only called on momentum trades (1-3/day max). Uses Haiku + tiny prompt to save credits.
-    Returns True if trade is approved, False if rejected.
+    Called on every momentum trade. If Claude rejects, is uncertain, or API fails → skip trade.
+    Returns True only if Claude explicitly returns ok_to_trade = true.
     """
     try:
         import json as _json
         import anthropic
         client = anthropic.Anthropic()
 
-        # Gather Binance data for richer context
+        # Gather ALL Binance data for Claude to evaluate
         binance_summary = {}
         if symbol:
             momentum = crypto_predictor.get_realtime_momentum(symbol)
@@ -537,6 +571,9 @@ def _claude_news_check(question: str, direction: str, edge: float,
             if htf:
                 binance_summary["htf_trend_4h"] = htf.get("trend_4h", "unknown")
                 binance_summary["htf_trend_1h"] = htf.get("trend_1h", "unknown")
+            ob = crypto_predictor.get_orderbook_imbalance(symbol)
+            if ob:
+                binance_summary["orderbook_imbalance"] = round(ob.get("imbalance", 0.5), 2)
 
         payload = _json.dumps({
             "coin": symbol or "BTC",
@@ -548,23 +585,26 @@ def _claude_news_check(question: str, direction: str, edge: float,
         })
 
         response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=100,
+            model="claude-sonnet-4-6",
+            max_tokens=120,
             system=NEWS_GATE_SYSTEM,
             messages=[{"role": "user", "content": payload}],
         )
         text = response.content[0].text.strip()
-        print(f"  [CLAUDE] {text[:80]}")
+        print(f"  [CLAUDE GATE] {text[:100]}")
 
         try:
             result = _json.loads(text)
-            return result.get("ok_to_trade", False)
+            approved = result.get("ok_to_trade", False) is True
+            if not approved:
+                print(f"  [CLAUDE GATE] REJECTED: {result.get('reason', 'no reason')}")
+            return approved
         except _json.JSONDecodeError:
-            # Fallback: check for APPROVE/REJECT in plain text
-            return "true" in text.lower() or text.upper().startswith("APPROVE")
+            print(f"  [CLAUDE GATE] Bad response format — blocking trade")
+            return False
 
     except Exception as e:
-        print(f"  [CLAUDE] Failed ({e}) — blocking trade (conservative)")
+        print(f"  [CLAUDE GATE] Failed ({e}) — blocking trade (conservative)")
         return False
 
 
@@ -699,13 +739,17 @@ def run_cycle():
     open_token_ids = {t["token_id"] for t in open_trades}
     markets = [m for m in markets if not any(tid in open_token_ids for tid in m.get("token_ids", []))]
 
-    print(f"[INFO] {len(markets)} markets to scan")
+    # Filter out non-allowed durations (blocks hourly/15-min crypto markets)
+    markets = [m for m in markets if _is_allowed_market_duration(m.get("question", ""))]
+
+    active = _get_active_strategies()
+    print(f"[INFO] {len(markets)} markets to scan | ACTIVE_STRATEGIES = {active}")
 
     trades_placed = 0
 
-    # === STRATEGY 0: THRESHOLD (mean-reversion on extreme prices) ===
+    # === THRESHOLD (disabled by default) ===
     if config.ENABLE_THRESHOLD:
-        print("[INFO] Strategy 0: Scanning for threshold opportunities...")
+        print("[INFO] Threshold: Scanning for threshold opportunities...")
         threshold_opps = scan_threshold_opportunities(markets)
         if threshold_opps:
             print(f"  Found {len(threshold_opps)} threshold opportunities!")
@@ -720,7 +764,7 @@ def run_cycle():
 
     # === STRATEGY 1: ARBITRAGE (guaranteed profit) ===
     if config.ENABLE_ARB:
-        print("[INFO] Strategy 1: Scanning for arbitrage...")
+        print("[INFO] [ARB] Scanning for arbitrage...")
         arb_opportunities = scan_all_markets(markets)
 
         if arb_opportunities:
@@ -760,9 +804,9 @@ def run_cycle():
         else:
             print("[INFO] No arb opportunities (spreads are tight)")
 
-    # === STRATEGY 2: RESOLUTION SNIPER (near-certain at discount) ===
+    # === STRATEGY 3: RESOLUTION SNIPER (near-certain at discount, off by default) ===
     if config.ENABLE_SNIPE and bankroll >= config.MIN_ORDER_SIZE_USD:
-        print("[INFO] Strategy 2: Scanning for resolution snipes...")
+        print("[INFO] [SNIPE] Scanning for resolution snipes...")
         snipes = scan_resolution_snipes(markets)
 
         if snipes:
@@ -777,11 +821,11 @@ def run_cycle():
         else:
             print("[INFO] No snipe opportunities (nothing near-certain at a discount)")
 
-    # === STRATEGY 3: MOMENTUM (strict — trending + entry window + 3+ boosters) ===
-    if config.ENABLE_MOMENTUM_INTRADAY and bankroll >= config.MIN_ORDER_SIZE_USD and trades_placed == 0:
+    # === STRATEGY 2: MOMENTUM + CLAUDE GATE (5-min crypto only) ===
+    if config.ENABLE_MOMENTUM_CLAUDE and bankroll >= config.MIN_ORDER_SIZE_USD and trades_placed == 0:
         regime = crypto_predictor.get_regime()
         candle = crypto_predictor.get_candle_position()
-        print(f"[INFO] Strategy 3: Momentum check | regime={regime} candle={candle['phase']} ({candle['seconds_elapsed']}s in)")
+        print(f"[INFO] [MOMENTUM] Checking | regime={regime} candle={candle['phase']} ({candle['seconds_elapsed']}s in)")
 
         if regime in ("trending", "choppy") and candle["phase"] == "entry_window":
             # Only scan crypto up/down markets for momentum
@@ -1057,10 +1101,13 @@ def main():
     print(f"  Cash:        ${bankroll:.2f}")
     print(f"  Positions:   ${pos_value:.2f}")
     print(f"  Total:       ${total_equity:.2f}")
-    print(f"  Strategy 0:  Threshold      {'ON' if config.ENABLE_THRESHOLD else 'OFF'}")
-    print(f"  Strategy 1:  Arbitrage      {'ON' if config.ENABLE_ARB else 'OFF'}")
-    print(f"  Strategy 2:  Sniper         {'ON' if config.ENABLE_SNIPE else 'OFF'}")
-    print(f"  Strategy 3:  Momentum       {'ON' if config.ENABLE_MOMENTUM_INTRADAY else 'OFF'}")
+    active = _get_active_strategies()
+    print(f"  Active:      {active}")
+    print(f"  Arb:         {'ON' if config.ENABLE_ARB else 'OFF'}")
+    print(f"  Momentum:    {'ON (Sonnet gate)' if config.ENABLE_MOMENTUM_CLAUDE else 'OFF'}")
+    print(f"  Sniper:      {'ON' if config.ENABLE_SNIPE else 'OFF'}")
+    print(f"  Threshold:   {'ON' if config.ENABLE_THRESHOLD else 'OFF'}")
+    print(f"  Markets:     {', '.join(config.ALLOWED_MARKET_DURATIONS)} only")
     print(f"  Cycle:       {config.CYCLE_INTERVAL_SEC}s")
     print("=" * 55)
     print()
