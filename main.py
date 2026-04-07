@@ -9,6 +9,7 @@ No Claude API calls. No momentum. No coin flips. Pure math.
 
 import sys
 import time
+import threading
 import traceback
 from datetime import date, datetime, timezone
 
@@ -801,6 +802,101 @@ def run_cycle():
 
 
 # ──────────────────────────────────────────────────────────
+# P&L WATCHER THREAD
+# ──────────────────────────────────────────────────────────
+
+def pnl_watcher_thread():
+    """Background thread that monitors open positions every 3 seconds.
+
+    Sells immediately if:
+    - Down 30% → cut loss
+    - <30s left and losing → time exit
+    - <60s left and up 15%+ → lock profit
+    """
+    while True:
+        try:
+            open_trades = database.get_open_trades()
+
+            for trade in open_trades:
+                token_id = trade["token_id"]
+                entry_price = trade["entry_price"]
+                question = trade.get("market_question", "")
+                trade_size = trade.get("size", 0)
+
+                if token_id in _dead_tokens:
+                    continue
+
+                # Get current price
+                current_price = trader.get_midpoint(token_id)
+                if not current_price or current_price <= 0:
+                    continue
+
+                # Calculate P&L percentage
+                pnl_pct = (current_price - entry_price) / entry_price if entry_price > 0 else 0
+
+                # Calculate minutes left from market end date
+                end_date = trade.get("end_date") or ""
+                minutes_left = 999  # Default: far from expiry
+                if not end_date:
+                    # Try to extract from question for 5-min markets
+                    # Fall back to candle position
+                    candle = crypto_predictor.get_candle_position()
+                    minutes_left = candle["seconds_remaining"] / 60
+
+                if end_date:
+                    try:
+                        end_dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+                        minutes_left = (end_dt - datetime.now(timezone.utc)).total_seconds() / 60
+                    except (ValueError, TypeError):
+                        pass
+
+                should_sell = False
+                reason = ""
+
+                # Rule 1: Down 30% → cut loss
+                if pnl_pct <= -0.30:
+                    should_sell = True
+                    reason = f"CUT LOSS ({pnl_pct:.0%})"
+
+                # Rule 2: <30s left and losing → time exit
+                elif minutes_left < 0.5 and pnl_pct < 0:
+                    should_sell = True
+                    reason = f"TIME EXIT (losing {pnl_pct:.0%}, {minutes_left*60:.0f}s left)"
+
+                # Rule 3: <60s left and up 15%+ → lock profit
+                elif minutes_left < 1.0 and pnl_pct >= 0.15:
+                    should_sell = True
+                    reason = f"LOCK PROFIT (+{pnl_pct:.0%}, {minutes_left*60:.0f}s left)"
+
+                if should_sell:
+                    print(f"[P&L WATCHER] SELL '{question[:40]}' | price=${current_price:.3f} | pnl={pnl_pct:+.0%} | {reason}")
+
+                    # Get real position size from Polymarket
+                    live_positions = trader.get_positions()
+                    real_size = trade_size
+                    for p in (live_positions or []):
+                        if p.get("asset") == token_id and float(p.get("size", 0)) > 0:
+                            real_size = float(p["size"])
+                            break
+
+                    if real_size > 0 and not config.DRY_RUN:
+                        sell_price = max(0.01, min(0.99, round(current_price - 0.01, 2)))
+                        trader.place_limit_order(token_id, sell_price, real_size, "SELL")
+
+                    # Update DB
+                    pnl = (current_price - entry_price) * real_size
+                    r_mult = calculate_r_multiple(entry_price, current_price, entry_price)
+                    status = "won" if pnl > 0 else "lost"
+                    database.update_trade_result(trade["id"], current_price, pnl, r_mult, status)
+                    print(f"[P&L WATCHER] Closed: PnL=${pnl:+.2f} | status={status}")
+
+        except Exception as e:
+            print(f"[P&L WATCHER] Error: {e}")
+
+        time.sleep(3)
+
+
+# ──────────────────────────────────────────────────────────
 # STARTUP
 # ──────────────────────────────────────────────────────────
 
@@ -874,6 +970,12 @@ def main():
     print(f"  Strategy 3:  Momentum + Gap (HTF aligned, Haiku gate)")
     print(f"  Cycle:       {config.CYCLE_INTERVAL_SEC}s")
     print("=" * 55)
+    print()
+
+    # Start P&L watcher daemon thread
+    watcher = threading.Thread(target=pnl_watcher_thread, daemon=True)
+    watcher.start()
+    print("[P&L WATCHER] Started — checking every 3 seconds")
     print()
 
     while True:
