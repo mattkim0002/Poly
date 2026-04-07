@@ -462,38 +462,87 @@ def _print_portfolio(bankroll: float, open_trades: list[dict], recent_trades: li
     print()
 
 
-def _claude_news_check(question: str, direction: str, edge: float) -> bool:
-    """Quick Claude check: any major news that overrides this momentum signal?
+NEWS_GATE_SYSTEM = """You are a fast risk filter for a Polymarket 5-minute crypto trading bot.
 
-    Only called on momentum trades (1-3/day max). Keeps prompt short to save credits.
+Your ONLY job: decide if it is SAFE or DANGEROUS to take the specific trade the bot is about to place,
+based on NEWS + BINANCE DATA.
+
+You MUST answer in a SHORT JSON object, nothing else:
+
+{"ok_to_trade": true or false, "reason": "single short sentence", "confidence": "low|medium|high"}
+
+Rules:
+1. If there is STRONG bullish news for the coin and the bot wants to SHORT (bet DOWN), ok_to_trade = false.
+2. If there is STRONG bearish news and the bot wants to LONG (bet UP), ok_to_trade = false.
+3. If Binance 15-30 minute data shows a clean, high-volume trend AGAINST the trade direction, ok_to_trade = false.
+4. If there is NO clear news and signals are mixed or weak, default to ok_to_trade = false.
+5. ONLY set ok_to_trade = true when:
+   - No obvious strong news against the trade, AND
+   - Binance data supports the trade direction, AND
+   - There is no strong trend against it.
+
+Be extremely conservative. When in doubt, set ok_to_trade = false.
+Never write anything outside the JSON. No prose, no markdown, just JSON."""
+
+
+def _claude_news_check(question: str, direction: str, edge: float,
+                       symbol: str = None, poly_price: float = 0.0) -> bool:
+    """Claude risk gate: check if news/data contradicts this momentum signal.
+
+    Only called on momentum trades (1-3/day max). Uses Haiku + tiny prompt to save credits.
     Returns True if trade is approved, False if rejected.
     """
     try:
+        import json as _json
         import anthropic
         client = anthropic.Anthropic()
 
-        prompt = f"""Trade check. One word answer: APPROVE or REJECT.
+        # Gather Binance data for richer context
+        binance_summary = {}
+        if symbol:
+            momentum = crypto_predictor.get_realtime_momentum(symbol)
+            if momentum:
+                binance_summary = {
+                    "price": momentum["current_price"],
+                    "change_60s": f"{momentum['price_change_60s']:+.3f}%",
+                    "change_180s": f"{momentum['price_change_180s']:+.3f}%",
+                    "volume_ratio": round(momentum["volume_ratio"], 2),
+                    "buy_pressure": round(momentum["buy_pressure"], 2),
+                    "accelerating": momentum["is_accelerating"],
+                }
+            htf = crypto_predictor.get_higher_timeframe_trend(symbol)
+            if htf:
+                binance_summary["htf_trend_4h"] = htf.get("trend_4h", "unknown")
+                binance_summary["htf_trend_1h"] = htf.get("trend_1h", "unknown")
 
-Market: {question}
-Signal: {direction}
-Edge: {edge:.1%}
-
-REJECT only if a major recent event (war, peace deal, regulation, hack, ETF) clearly contradicts this direction. Otherwise APPROVE.
-
-Answer APPROVE or REJECT, then 5 words max why."""
+        payload = _json.dumps({
+            "coin": symbol or "BTC",
+            "side": direction,
+            "polymarket_price": poly_price,
+            "edge": f"{edge:.1%}",
+            "market": question[:80],
+            "binance": binance_summary,
+        })
 
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=30,
-            messages=[{"role": "user", "content": prompt}],
+            max_tokens=100,
+            system=NEWS_GATE_SYSTEM,
+            messages=[{"role": "user", "content": payload}],
         )
-        text = response.content[0].text.strip().upper()
-        approved = text.startswith("APPROVE")
-        print(f"  [CLAUDE] {text[:60]}")
-        return approved
+        text = response.content[0].text.strip()
+        print(f"  [CLAUDE] {text[:80]}")
+
+        try:
+            result = _json.loads(text)
+            return result.get("ok_to_trade", False)
+        except _json.JSONDecodeError:
+            # Fallback: check for APPROVE/REJECT in plain text
+            return "true" in text.lower() or text.upper().startswith("APPROVE")
+
     except Exception as e:
-        print(f"  [CLAUDE] Failed ({e}) — approving by default")
-        return True
+        print(f"  [CLAUDE] Failed ({e}) — blocking trade (conservative)")
+        return False
 
 
 def _execute_momentum_trade(trade: dict, bankroll: float) -> bool:
@@ -518,10 +567,18 @@ def _execute_momentum_trade(trade: dict, bankroll: float) -> bool:
     print(f"  Edge:    {edge:.1%}")
     print(f"  Shares:  {shares} (${cost:.2f})")
 
-    # Claude news gate — reject if major event contradicts signal
-    direction = f"{trade['outcome']} (price {'up' if trade['outcome'] == 'Yes' else 'down'})"
-    if not _claude_news_check(trade["question"], direction, edge):
-        print(f"  [BLOCKED] Claude rejected — news contradicts signal")
+    # Claude news gate — reject if news/data contradicts signal
+    direction = "UP" if trade["outcome"] == "Yes" else "DOWN"
+    # Detect symbol from question
+    q_lower = trade["question"].lower()
+    symbol = None
+    for coin, sym in crypto_predictor.BINANCE_SYMBOLS.items():
+        if coin in q_lower:
+            symbol = sym
+            break
+    if not _claude_news_check(trade["question"], direction, edge,
+                              symbol=symbol, poly_price=price):
+        print(f"  [BLOCKED] Claude rejected — news/data contradicts signal")
         return False
 
     print(f"  ======================")
