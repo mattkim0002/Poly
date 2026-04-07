@@ -112,6 +112,10 @@ PREFERRED_KEYWORDS = {
     "up or down", "5 minutes", "15 minutes", "1 day",
 }
 
+# === Market Category Filters ===
+WHITELIST_CATEGORIES = ["crypto"]
+BLACKLIST_KEYWORDS = ["win the", "election", "president", "minister", "vote", "poll"]
+
 # === Edge Thresholds ===
 # Math: with $35 bankroll and $5 min bet, each trade is ~14% of bankroll.
 # Need high confidence to justify that concentration.
@@ -126,7 +130,7 @@ MIN_EV_PER_DOLLAR = 0.02           # $0.02 EV per dollar risked
 # So $5 bets are actually near-optimal Kelly for moderate edges.
 KELLY_FRACTION = 0.40              # 40% Kelly — but floor is $5 anyway
 MAX_POSITION_PCT = 0.20            # Cap at $7 per trade (20% of $35)
-MAX_OPEN_POSITIONS = 4             # Max $20 at risk (80% of bankroll)
+MAX_OPEN_POSITIONS = 2             # Reduced — keep buffer cash for sell orders
 MIN_ORDER_SIZE_USD = 1.0           # Will get bumped to $5 by Polymarket minimum
 
 # === Risk Management ===

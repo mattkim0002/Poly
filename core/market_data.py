@@ -44,6 +44,11 @@ def get_active_markets(limit: int = 100) -> list[dict]:
         if not m.get("enableOrderBook"):
             continue
 
+        # Blacklist filter
+        question_lower = (m.get("question", "") or "").lower()
+        if any(kw in question_lower for kw in config.BLACKLIST_KEYWORDS):
+            continue
+
         volume = float(m.get("volume", 0) or 0)
         liquidity = float(m.get("liquidity", 0) or 0)
 
