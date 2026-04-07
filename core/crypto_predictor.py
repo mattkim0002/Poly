@@ -77,11 +77,11 @@ def get_regime(symbol: str = "BTCUSDT") -> str:
     closes = [float(c[4]) for c in candles]
     ups = sum(1 for i in range(1, len(closes)) if closes[i] > closes[i - 1])
 
-    log.info("Regime check: %s=$%.0f ATR=$%.1f (%.4f%%) ups=%d/9",
+    log.info("[REGIME] %s=$%.0f ATR=$%.1f (%.4f%%) ups=%d/9 (threshold: 0.03%%)",
              symbol, price, atr, atr_pct * 100, ups)
 
-    if atr_pct < 0.0001:
-        return "dead"          # Truly flatlined (< 0.01%)
+    if atr_pct < 0.0003:
+        return "dead"          # Below 0.03% — no meaningful movement
     elif ups >= 6 or ups <= 3:
         return "trending"      # 6+/9 same direction = good enough
     else:
@@ -488,6 +488,58 @@ def get_open_interest(symbol: str) -> dict | None:
         log.debug("Failed to fetch open interest for %s: %s", symbol, e)
         return None
 
+
+
+def get_binance_implied_probability(symbol: str, direction: str = "up") -> float | None:
+    """Calculate implied probability that the coin goes UP based on Binance data.
+
+    Uses last 60 seconds of 1-minute candles:
+    - Price vs open: if current > open, lean UP
+    - Volume pressure: buy volume / total volume
+    - Rate of change: (current - 60s_ago) / 60s_ago
+
+    Returns float 0.0-1.0 representing implied UP probability.
+    """
+    candles = _fetch_candles(symbol, "1m", 3)
+    if not candles or len(candles) < 2:
+        return None
+
+    current_price = candles[-1]["close"]
+    open_price = candles[-2]["open"]  # ~60 seconds ago
+
+    # Component 1: price vs open (0.0-1.0)
+    if open_price <= 0:
+        return None
+    price_ratio = (current_price - open_price) / open_price
+    # Map to probability: +0.1% move → ~0.65, -0.1% → ~0.35, flat → 0.50
+    price_signal = 0.5 + (price_ratio * 500)  # ±0.1% → ±0.05 shift
+    price_signal = max(0.1, min(0.9, price_signal))
+
+    # Component 2: buy volume pressure (0.0-1.0)
+    total_vol = sum(c["volume"] for c in candles[-2:])
+    total_buy = sum(c["buy_volume"] for c in candles[-2:])
+    buy_pressure = total_buy / total_vol if total_vol > 0 else 0.5
+
+    # Component 3: rate of change magnitude
+    roc = abs(price_ratio) * 100  # as percentage
+    roc_weight = min(roc / 0.1, 1.0)  # 0.1% move = full weight
+
+    # Weighted combination
+    implied_up = (price_signal * 0.5) + (buy_pressure * 0.3) + (0.5 * 0.2)
+
+    # Strengthen signal if rate of change is significant
+    if roc_weight > 0.5:
+        if price_ratio > 0:
+            implied_up = min(0.90, implied_up + roc_weight * 0.1)
+        else:
+            implied_up = max(0.10, implied_up - roc_weight * 0.1)
+
+    implied_up = max(0.05, min(0.95, implied_up))
+
+    log.info("[GAP SIGNAL] %s: price=$%.2f open=$%.2f roc=%.4f%% buy_pressure=%.0f%% implied_up=%.0f%%",
+             symbol, current_price, open_price, price_ratio * 100, buy_pressure * 100, implied_up * 100)
+
+    return implied_up
 
 
 def get_higher_timeframe_trend(symbol: str) -> dict:

@@ -29,6 +29,150 @@ _session_start_bankroll = 0.0
 _dead_tokens = set()
 
 
+# ──────────────────────────────────────────────────────────
+# STRATEGY 0: THRESHOLD (mean-reversion on extreme prices)
+# Buy YES when price <= 28¢ (market too bearish)
+# Buy NO when YES price >= 72¢ (market too bullish)
+# Only enter after 2.5 minutes into candle (150s)
+# ──────────────────────────────────────────────────────────
+
+THRESHOLD_YES_MAX = 0.28   # Buy YES when ask <= this
+THRESHOLD_NO_MIN = 0.72    # Buy NO when YES ask >= this
+THRESHOLD_TP_YES = 0.95    # Take profit for YES buys
+THRESHOLD_TP_NO = 0.05     # Take profit for NO buys
+THRESHOLD_SL_YES = 0.45    # Stop loss for YES buys
+THRESHOLD_SL_NO = 0.55     # Stop loss for NO buys
+
+
+def scan_threshold_opportunities(markets: list[dict]) -> list[dict]:
+    """Scan 5-min crypto markets for extreme-price mean-reversion entries.
+
+    Only enters after 150 seconds into the current 5-minute candle.
+    """
+    now = datetime.now(timezone.utc)
+    seconds_into_candle = (now.minute % 5) * 60 + now.second
+
+    if seconds_into_candle < 150:
+        print(f"[THRESHOLD] Waiting for candle maturity ({seconds_into_candle}s < 150s)")
+        return []
+
+    opportunities = []
+
+    for market in markets:
+        question = (market.get("question") or "").lower()
+        token_ids = market.get("token_ids", [])
+
+        # Only 5-min crypto up/down markets
+        if "up or down" not in question or len(token_ids) < 2:
+            continue
+
+        # Check resolution window (2-30 min)
+        end_date = market.get("end_date") or market.get("endDate") or ""
+        if end_date:
+            try:
+                end_dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+                minutes_left = (end_dt - datetime.now(timezone.utc)).total_seconds() / 60
+                if minutes_left < 2 or minutes_left > 30:
+                    continue
+            except (ValueError, TypeError):
+                continue
+
+        yes_token = token_ids[0]
+        no_token = token_ids[1]
+
+        # Get real orderbook ask for YES side
+        book = trader.get_orderbook(yes_token)
+        if not book or not book.get("asks"):
+            continue
+
+        yes_ask = book["asks"][0]["price"]
+        yes_ask_size = book["asks"][0]["size"]
+
+        if yes_ask <= THRESHOLD_YES_MAX:
+            # Market thinks DOWN is very likely — buy YES (mean reversion)
+            print(f"[THRESHOLD] BUY YES {market.get('question', '')[:50]} at {yes_ask*100:.0f}c — TP: 95c SL: 45c")
+            opportunities.append({
+                "question": market.get("question", ""),
+                "market_id": market.get("id", ""),
+                "token_id": yes_token,
+                "outcome": "Yes",
+                "ask_price": yes_ask,
+                "ask_size": yes_ask_size,
+                "tp": THRESHOLD_TP_YES,
+                "sl": THRESHOLD_SL_YES,
+            })
+
+        elif yes_ask >= THRESHOLD_NO_MIN:
+            # Market thinks UP is very likely — buy NO (mean reversion)
+            no_book = trader.get_orderbook(no_token)
+            if not no_book or not no_book.get("asks"):
+                continue
+            no_ask = no_book["asks"][0]["price"]
+            no_ask_size = no_book["asks"][0]["size"]
+
+            print(f"[THRESHOLD] BUY NO {market.get('question', '')[:50]} at {no_ask*100:.0f}c — TP: 5c SL: 55c")
+            opportunities.append({
+                "question": market.get("question", ""),
+                "market_id": market.get("id", ""),
+                "token_id": no_token,
+                "outcome": "No",
+                "ask_price": no_ask,
+                "ask_size": no_ask_size,
+                "tp": THRESHOLD_TP_NO,
+                "sl": THRESHOLD_SL_NO,
+            })
+
+    return opportunities
+
+
+def execute_threshold_trade(opp: dict, bankroll: float) -> bool:
+    """Execute a threshold mean-reversion trade with a limit order."""
+    max_spend = min(bankroll * 0.25, bankroll - 2.0)
+    if max_spend < config.MIN_ORDER_SIZE_USD:
+        return False
+
+    price = opp["ask_price"]
+    max_shares_by_bank = int(max_spend / price) if price > 0 else 0
+    max_shares_by_book = int(opp["ask_size"])
+    shares = min(max_shares_by_bank, max_shares_by_book)
+    shares = max(shares, 5)
+
+    cost = shares * price
+
+    print(f"\n  === THRESHOLD TRADE ===")
+    print(f"  Market:  {opp['question'][:55]}")
+    print(f"  Side:    {opp['outcome']} @ ${price:.3f} (LIMIT)")
+    print(f"  Shares:  {shares} (${cost:.2f})")
+    print(f"  TP:      ${opp['tp']:.2f}  SL: ${opp['sl']:.2f}")
+    print(f"  =========================")
+
+    order_id = trader.place_limit_order(
+        token_id=opp["token_id"],
+        price=price,
+        size=shares,
+        side="BUY",
+    )
+
+    if not order_id:
+        print(f"  [FAIL] Order failed")
+        return False
+
+    print(f"  [SUCCESS] Order placed: {order_id}")
+
+    database.record_trade(
+        market_id=opp["market_id"],
+        market_question=f"[THRESH] {opp['question'][:80]}",
+        token_id=opp["token_id"],
+        side="BUY", outcome=opp["outcome"],
+        entry_price=price, size=shares, cost=cost,
+        order_id=order_id,
+        claude_probability=0.0, market_probability=price,
+        edge=(1.0 - price) if opp["outcome"] == "Yes" else price,
+        kelly_frac=0.0, dd_mult=1.0, signal_mult=1.0,
+    )
+    return True
+
+
 def _is_junk_market(question: str) -> bool:
     q_lower = question.lower()
     for keyword in config.SPORTS_KEYWORDS:
@@ -236,7 +380,35 @@ def _check_existing_positions(open_trades: list[dict]):
             _daily_pnl += pnl
             print(f"  LOSS: '{question[:40]}' | PnL=${pnl:.2f}")
 
-        # Stop loss for non-arb positions
+        # Threshold trades — custom TP/SL levels
+        elif "[THRESH]" in question:
+            is_yes = trade.get("outcome") == "Yes"
+            tp_level = THRESHOLD_TP_YES if is_yes else THRESHOLD_TP_NO
+            sl_level = THRESHOLD_SL_YES if is_yes else THRESHOLD_SL_NO
+
+            # Take profit
+            if (is_yes and current_price >= tp_level) or (not is_yes and current_price <= tp_level):
+                pnl = (current_price - avg_price) * real_size if is_yes else (avg_price - current_price) * real_size
+                pnl = (1.0 - avg_price) * real_size  # Resolution payout
+                r_mult = calculate_r_multiple(avg_price, current_price, avg_price)
+                database.update_trade_result(trade["id"], current_price, pnl, r_mult, "won")
+                _daily_pnl += pnl
+                print(f"  [THRESHOLD TP] '{question[:40]}' | PnL=${pnl:+.2f}")
+                if not config.DRY_RUN:
+                    sell_price = max(0.01, min(0.99, round(current_price - 0.01, 2)))
+                    trader.place_limit_order(token_id, sell_price, real_size, "SELL")
+
+            # Stop loss
+            elif (is_yes and current_price >= sl_level) or (not is_yes and current_price <= sl_level):
+                pnl = (current_price - avg_price) * real_size
+                r_mult = calculate_r_multiple(avg_price, current_price, avg_price)
+                database.update_trade_result(trade["id"], current_price, pnl, r_mult, "lost")
+                _daily_pnl += pnl
+                print(f"  [THRESHOLD SL] '{question[:40]}' | PnL=${pnl:.2f}")
+                if not config.DRY_RUN:
+                    trader.place_limit_order(token_id, current_price, real_size, "SELL")
+
+        # Stop loss for other non-arb positions
         elif "[ARB" not in question and "[SNIPE]" not in question:
             loss_pct = (avg_price - current_price) / avg_price if avg_price > 0 else 0
             if loss_pct >= config.STOP_LOSS_PCT:
@@ -450,6 +622,20 @@ def run_cycle():
 
     trades_placed = 0
 
+    # === STRATEGY 0: THRESHOLD (mean-reversion on extreme prices) ===
+    print("[INFO] Strategy 0: Scanning for threshold opportunities...")
+    threshold_opps = scan_threshold_opportunities(markets)
+    if threshold_opps:
+        print(f"  Found {len(threshold_opps)} threshold opportunities!")
+        for opp in threshold_opps[:2]:
+            if bankroll < config.MIN_ORDER_SIZE_USD:
+                break
+            if execute_threshold_trade(opp, bankroll):
+                trades_placed += 1
+                bankroll -= opp["ask_price"] * 5
+    else:
+        print("[INFO] No threshold opportunities (no extreme prices)")
+
     # === STRATEGY 1: ARBITRAGE (guaranteed profit) ===
     print("[INFO] Strategy 1: Scanning for arbitrage...")
     arb_opportunities = scan_all_markets(markets)
@@ -536,7 +722,45 @@ def run_cycle():
                     if not yes_price or not no_price:
                         continue
 
-                    # Check both sides
+                    # Determine symbol for gap detection
+                    q_lower = question.lower()
+                    symbol = None
+                    for coin, sym in crypto_predictor.BINANCE_SYMBOLS.items():
+                        if coin in q_lower:
+                            symbol = sym
+                            break
+
+                    # Gap detection: Binance implied prob vs Polymarket price
+                    binance_prob = crypto_predictor.get_binance_implied_probability(symbol) if symbol else None
+
+                    if binance_prob is not None and yes_price > 0:
+                        gap = binance_prob - yes_price
+                        print(f"  [GAP SIGNAL] {question[:40]} | Binance={binance_prob:.0%} Polymarket={yes_price:.0%} Gap={gap:+.0%}")
+
+                        if gap >= 0.20:
+                            # Binance says UP but Polymarket still cheap — BUY YES
+                            best_edge = gap
+                            best_trade = {
+                                "market_id": market["id"], "question": question,
+                                "token_id": yes_token, "outcome": "Yes",
+                                "price": yes_price, "probability": binance_prob,
+                                "edge": gap, "signal": {"confidence": "high", "combo": "gap", "kelly_mult": 1.0,
+                                                         "reasoning": f"Gap={gap:.0%} Binance={binance_prob:.0%}"},
+                            }
+                            continue  # Skip normal momentum for this market
+                        elif gap <= -0.20:
+                            # Binance says DOWN but Polymarket overpriced UP — BUY NO
+                            best_edge = abs(gap)
+                            best_trade = {
+                                "market_id": market["id"], "question": question,
+                                "token_id": no_token, "outcome": "No",
+                                "price": no_price, "probability": 1.0 - binance_prob,
+                                "edge": abs(gap), "signal": {"confidence": "high", "combo": "gap", "kelly_mult": 1.0,
+                                                              "reasoning": f"Gap={gap:.0%} Binance={binance_prob:.0%}"},
+                            }
+                            continue
+
+                    # Fallback: normal momentum check
                     for outcome, token_id, price in [("Yes", yes_token, yes_price), ("No", no_token, no_price)]:
                         result = crypto_predictor.estimate_crypto_probability(question, price, outcome)
                         if not result:
@@ -639,15 +863,15 @@ def main():
 
     print()
     print("=" * 55)
-    print("          ARB SCANNER + RESOLUTION SNIPER")
+    print("          POLYMARKET TRADING BOT")
     print(f"  Mode:        {'LIVE TRADING' if not config.DRY_RUN else 'DRY RUN'}")
     print(f"  Cash:        ${bankroll:.2f}")
     print(f"  Positions:   ${pos_value:.2f}")
     print(f"  Total:       ${total_equity:.2f}")
+    print(f"  Strategy 0:  Threshold (YES<=28c / NO<=28c mean-reversion)")
     print(f"  Strategy 1:  Arbitrage (Yes+No < $1.00)")
     print(f"  Strategy 2:  Resolution snipe ($0.90-$0.96)")
-    print(f"  Strategy 3:  Momentum (trending + entry window + 3+ signals)")
-    print(f"  Claude API:  NONE (zero credit burn)")
+    print(f"  Strategy 3:  Momentum + Gap (HTF aligned, Haiku gate)")
     print(f"  Cycle:       {config.CYCLE_INTERVAL_SEC}s")
     print("=" * 55)
     print()
