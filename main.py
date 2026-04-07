@@ -827,7 +827,11 @@ def pnl_watcher_thread():
                     continue
 
                 # Get current price
-                current_price = trader.get_midpoint(token_id)
+                try:
+                    current_price = trader.get_midpoint(token_id)
+                except Exception:
+                    _dead_tokens.add(token_id)
+                    continue
                 if not current_price or current_price <= 0:
                     continue
 
