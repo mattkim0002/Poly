@@ -758,7 +758,7 @@ def run_cycle():
         candle = crypto_predictor.get_candle_position()
         print(f"[INFO] Strategy 3: Momentum check | regime={regime} candle={candle['phase']} ({candle['seconds_elapsed']}s in)")
 
-        if regime == "trending" and candle["phase"] == "entry_window":
+        if regime in ("trending", "choppy") and candle["phase"] == "entry_window":
             # Only scan crypto up/down markets for momentum
             crypto_markets = [m for m in markets
                               if crypto_predictor.is_crypto_updown_market(m.get("question", ""))]
