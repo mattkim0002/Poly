@@ -46,9 +46,10 @@ THRESHOLD_SL_NO = 0.55     # Stop loss for NO buys
 
 
 def scan_threshold_opportunities(markets: list[dict]) -> list[dict]:
-    """Scan 5-min crypto markets for extreme-price mean-reversion entries.
+    """Scan crypto markets for extreme-price mean-reversion entries.
 
     Only enters after 150 seconds into the current 5-minute candle.
+    CRITICAL: checks Binance real price before betting against the trend.
     """
     now = datetime.now(timezone.utc)
     seconds_into_candle = (now.minute % 5) * 60 + now.second
@@ -60,11 +61,12 @@ def scan_threshold_opportunities(markets: list[dict]) -> list[dict]:
     opportunities = []
 
     for market in markets:
-        question = (market.get("question") or "").lower()
+        question = (market.get("question") or "")
+        q_lower = question.lower()
         token_ids = market.get("token_ids", [])
 
-        # Only 5-min crypto up/down markets
-        if "up or down" not in question or len(token_ids) < 2:
+        # Only crypto up/down markets
+        if "up or down" not in q_lower or len(token_ids) < 2:
             continue
 
         # Check resolution window (2-30 min)
@@ -89,11 +91,25 @@ def scan_threshold_opportunities(markets: list[dict]) -> list[dict]:
         yes_ask = book["asks"][0]["price"]
         yes_ask_size = book["asks"][0]["size"]
 
+        # Detect symbol for Binance trend check
+        symbol = None
+        for coin, sym in crypto_predictor.BINANCE_SYMBOLS.items():
+            if coin in q_lower:
+                symbol = sym
+                break
+
         if yes_ask <= THRESHOLD_YES_MAX:
             # Market thinks DOWN is very likely — buy YES (mean reversion)
-            print(f"[THRESHOLD] BUY YES {market.get('question', '')[:50]} at {yes_ask*100:.0f}c — TP: 95c SL: 45c")
+            # BUT: check Binance — if price IS falling, don't fight it
+            if symbol:
+                binance_prob = crypto_predictor.get_binance_implied_probability(symbol)
+                if binance_prob is not None and binance_prob < 0.35:
+                    print(f"[THRESHOLD] SKIP YES {question[:50]} — Binance confirms DOWN ({binance_prob:.0%})")
+                    continue
+
+            print(f"[THRESHOLD] BUY YES {question[:50]} at {yes_ask*100:.0f}c — TP: 95c SL: 45c")
             opportunities.append({
-                "question": market.get("question", ""),
+                "question": question,
                 "market_id": market.get("id", ""),
                 "token_id": yes_token,
                 "outcome": "Yes",
@@ -105,15 +121,22 @@ def scan_threshold_opportunities(markets: list[dict]) -> list[dict]:
 
         elif yes_ask >= THRESHOLD_NO_MIN:
             # Market thinks UP is very likely — buy NO (mean reversion)
+            # BUT: check Binance — if price IS rising, don't fight it
+            if symbol:
+                binance_prob = crypto_predictor.get_binance_implied_probability(symbol)
+                if binance_prob is not None and binance_prob > 0.65:
+                    print(f"[THRESHOLD] SKIP NO {question[:50]} — Binance confirms UP ({binance_prob:.0%})")
+                    continue
+
             no_book = trader.get_orderbook(no_token)
             if not no_book or not no_book.get("asks"):
                 continue
             no_ask = no_book["asks"][0]["price"]
             no_ask_size = no_book["asks"][0]["size"]
 
-            print(f"[THRESHOLD] BUY NO {market.get('question', '')[:50]} at {no_ask*100:.0f}c — TP: 5c SL: 55c")
+            print(f"[THRESHOLD] BUY NO {question[:50]} at {no_ask*100:.0f}c — TP: 5c SL: 55c")
             opportunities.append({
-                "question": market.get("question", ""),
+                "question": question,
                 "market_id": market.get("id", ""),
                 "token_id": no_token,
                 "outcome": "No",
