@@ -20,9 +20,9 @@ SUPPORTED_COINS = {
 }
 
 # Minimum move over 10-15 min to consider a trade
-MIN_MOVE_PCT = 0.5       # 0.5% move required
+MIN_MOVE_PCT = 0.35      # 0.35% move required
 # Polymarket must be cheap relative to our estimate
-MAX_POLY_PRICE = 0.65    # Only buy if Poly price < 65c
+MAX_POLY_PRICE = 0.70    # Only buy if Poly price < 70c
 MIN_TRUE_PROB = 0.70     # Our estimate must be >= 70%
 
 CLAUDE_GATE_SYSTEM = """You are a risk filter for a Polymarket 5-minute crypto trading bot.
