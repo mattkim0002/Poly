@@ -50,6 +50,7 @@ MAX_MARKETS_PER_CYCLE = 50
 ENABLE_ARB = True                  # Strategy 1: crypto arb (Yes+No < $1.00)
 ENABLE_MOMENTUM_CLAUDE = True      # Strategy 2: momentum with Claude Sonnet gate
 ENABLE_SNIPE = False               # Strategy 3: resolution sniper (conservative, OFF by default)
+ENABLE_BINANCE_LAG = True          # Strategy 4: Binance-lag directional (Claude Sonnet veto)
 ENABLE_THRESHOLD = False           # DISABLED — mean-reversion loses on crypto trends
 ENABLE_MOMENTUM_INTRADAY = False   # DISABLED — experimental hourly/15-min markets
 
@@ -161,6 +162,11 @@ TAKE_PROFIT_EDGE_MIN = 0.01
 # === Crypto Limits ===
 CRYPTO_MAX_POSITION_PCT = 0.20     # 20% max per crypto bet = ~$7
 CRYPTO_CHECK_INTERVAL_SEC = 5      # Check every 5 seconds
+
+# === Binance-Lag Strategy ===
+BINANCE_LAG_MAX_POSITION_PCT = 0.10  # 10% of bankroll per lag trade (conservative)
+BINANCE_LAG_AUTO_DISABLE_TRADES = 30 # After N trades, check EV
+BINANCE_LAG_MIN_EV = 0.0            # Disable if EV goes negative over N trades
 
 # === Momentum Thresholds ===
 # These determine when Binance data shows a real move vs noise.

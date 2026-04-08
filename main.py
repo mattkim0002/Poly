@@ -19,6 +19,7 @@ import config
 from core import database, market_data, trader, crypto_predictor
 from strategies.risk import calculate_r_multiple, expectancy, drawdown_multiplier, drawdown
 from strategies.arbitrage import scan_all_markets, execute_arb
+from strategies.binance_lag import scan_binance_lag, claude_gate as binance_lag_claude_gate
 from strategies.ev import get_fee_rate, is_fee_free_market
 from utils.logger import log
 
@@ -225,12 +226,12 @@ def _get_active_strategies() -> list[str]:
     active = []
     if config.ENABLE_ARB:
         active.append("ARB")
+    if config.ENABLE_BINANCE_LAG:
+        active.append("BINANCE_LAG")
     if config.ENABLE_MOMENTUM_CLAUDE:
         active.append("MOMENTUM_CLAUDE")
     if config.ENABLE_SNIPE:
         active.append("SNIPE")
-    if config.ENABLE_THRESHOLD:
-        active.append("THRESHOLD")
     return active
 
 
@@ -804,6 +805,83 @@ def run_cycle():
         else:
             print("[INFO] No arb opportunities (spreads are tight)")
 
+    # === STRATEGY 2: BINANCE-LAG (directional, Claude Sonnet veto) ===
+    if config.ENABLE_BINANCE_LAG and bankroll >= config.MIN_ORDER_SIZE_USD and trades_placed == 0:
+        # Auto-disable check: if negative EV over N trades
+        lag_trades = [t for t in database.get_recent_trades(config.BINANCE_LAG_AUTO_DISABLE_TRADES)
+                      if "[LAG]" in (t.get("market_question") or "")]
+        if len(lag_trades) >= config.BINANCE_LAG_AUTO_DISABLE_TRADES:
+            lag_pnl = sum(t.get("pnl") or 0 for t in lag_trades)
+            if lag_pnl < config.BINANCE_LAG_MIN_EV:
+                print(f"[INFO] [BINANCE-LAG] Auto-throttled: negative EV (${lag_pnl:.2f}) over {len(lag_trades)} trades")
+            else:
+                lag_trades = []  # reset so we proceed
+
+        if len(lag_trades) < config.BINANCE_LAG_AUTO_DISABLE_TRADES:
+            print("[INFO] [BINANCE-LAG] Scanning for Binance-lag opportunities...")
+            lag_candidates = scan_binance_lag(markets)
+
+            for cand in lag_candidates[:1]:  # Only best candidate per cycle
+                print(f"  [BINANCE-LAG] PROPOSED: {cand['coin']} {cand['side']} | "
+                      f"move={cand['move_10m']:+.2f}% | Poly={cand['poly_price']:.2f} | "
+                      f"edge={cand['edge']:.1%} | vol={cand['vol_ratio']:.1f}x")
+
+                # Claude Sonnet veto
+                gate_result = binance_lag_claude_gate(cand)
+                if not gate_result:
+                    print(f"  [BINANCE-LAG] BLOCKED: Claude unavailable — skipping")
+                    continue
+
+                approved = gate_result.get("ok_to_trade", False) is True
+                confidence = gate_result.get("confidence", "low")
+                reason = gate_result.get("reason", "no reason")
+
+                if not approved or confidence == "low":
+                    print(f"  [BINANCE-LAG] BLOCKED by Claude: {reason} (confidence={confidence})")
+                    continue
+
+                print(f"  [BINANCE-LAG] APPROVED by Claude: {reason} (confidence={confidence})")
+
+                # Position sizing: capped at BINANCE_LAG_MAX_POSITION_PCT of total equity
+                max_spend = min(total_equity * config.BINANCE_LAG_MAX_POSITION_PCT, bankroll - 2.0)
+                if max_spend < config.MIN_ORDER_SIZE_USD:
+                    print(f"  [BINANCE-LAG] Insufficient funds (${max_spend:.2f})")
+                    continue
+
+                price = cand["poly_price"]
+                shares = max(5, int(max_spend / price)) if price > 0 else 5
+                cost = shares * price
+
+                print(f"  [BINANCE-LAG] EXECUTING: {cand['coin']} {cand['side']} | "
+                      f"{shares} shares @ ${price:.3f} (${cost:.2f}) | edge={cand['edge']:.1%}")
+
+                order_id = trader.place_limit_order(
+                    token_id=cand["token_id"],
+                    price=price,
+                    size=shares,
+                    side="BUY",
+                )
+
+                if order_id:
+                    print(f"  [BINANCE-LAG] Order placed: {order_id}")
+                    database.record_trade(
+                        market_id=cand["market"]["id"],
+                        market_question=f"[LAG] {cand['question'][:80]}",
+                        token_id=cand["token_id"],
+                        side="BUY", outcome=cand["outcome"],
+                        entry_price=price, size=shares, cost=cost,
+                        order_id=order_id,
+                        claude_probability=cand["true_prob"],
+                        market_probability=price,
+                        edge=cand["edge"],
+                        kelly_frac=config.BINANCE_LAG_MAX_POSITION_PCT,
+                        dd_mult=1.0, signal_mult=1.0,
+                    )
+                    trades_placed += 1
+                    bankroll -= cost
+                else:
+                    print(f"  [BINANCE-LAG] Order FAILED")
+
     # === STRATEGY 3: RESOLUTION SNIPER (near-certain at discount, off by default) ===
     if config.ENABLE_SNIPE and bankroll >= config.MIN_ORDER_SIZE_USD:
         print("[INFO] [SNIPE] Scanning for resolution snipes...")
@@ -1104,9 +1182,9 @@ def main():
     active = _get_active_strategies()
     print(f"  Active:      {active}")
     print(f"  Arb:         {'ON' if config.ENABLE_ARB else 'OFF'}")
+    print(f"  Binance-Lag: {'ON (Sonnet gate)' if config.ENABLE_BINANCE_LAG else 'OFF'}")
     print(f"  Momentum:    {'ON (Sonnet gate)' if config.ENABLE_MOMENTUM_CLAUDE else 'OFF'}")
     print(f"  Sniper:      {'ON' if config.ENABLE_SNIPE else 'OFF'}")
-    print(f"  Threshold:   {'ON' if config.ENABLE_THRESHOLD else 'OFF'}")
     print(f"  Markets:     {', '.join(config.ALLOWED_MARKET_DURATIONS)} only")
     print(f"  Cycle:       {config.CYCLE_INTERVAL_SEC}s")
     print("=" * 55)
