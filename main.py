@@ -773,7 +773,10 @@ def run_cycle():
             for arb in arb_opportunities[:2]:
                 if bankroll < config.MIN_ORDER_SIZE_USD * 2:
                     break
-                print(f"  ARB: {arb['question'][:50]} | Yes ${arb['yes_price']:.3f} + No ${arb['no_price']:.3f} = ${arb['total_cost']:.3f} | Profit: {arb['profit_pct']:.1%}")
+                thresh_label = f"threshold={arb.get('threshold', 0.98)}"
+                if arb.get("near_expiry"):
+                    thresh_label += " (near expiry)"
+                print(f"  ARB: {arb['question'][:50]} | Yes ${arb['yes_price']:.3f} + No ${arb['no_price']:.3f} = ${arb['total_cost']:.3f} | Profit: {arb['profit_pct']:.1%} | {thresh_label}")
                 result = execute_arb(arb, bankroll)
                 if result:
                     trades_placed += 1
@@ -1181,7 +1184,8 @@ def main():
     print(f"  Total:       ${total_equity:.2f}")
     active = _get_active_strategies()
     print(f"  Active:      {active}")
-    print(f"  Arb:         {'ON' if config.ENABLE_ARB else 'OFF'}")
+    from strategies.arbitrage import ARB_THRESHOLD_NORMAL, ARB_THRESHOLD_NEAR_EXPIRY, NEAR_EXPIRY_MINUTES
+    print(f"  Arb:         {'ON' if config.ENABLE_ARB else 'OFF'} (normal<{ARB_THRESHOLD_NORMAL}, expiry<{ARB_THRESHOLD_NEAR_EXPIRY} within {NEAR_EXPIRY_MINUTES}min)")
     print(f"  Binance-Lag: {'ON (Sonnet gate)' if config.ENABLE_BINANCE_LAG else 'OFF'}")
     print(f"  Momentum:    {'ON (Sonnet gate)' if config.ENABLE_MOMENTUM_CLAUDE else 'OFF'}")
     print(f"  Sniper:      {'ON' if config.ENABLE_SNIPE else 'OFF'}")

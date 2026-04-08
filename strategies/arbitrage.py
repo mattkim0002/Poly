@@ -3,26 +3,34 @@
 Strategy:
 1. Scan ALL active markets (crypto, politics, events, anything)
 2. Check REAL orderbook prices (actual fillable asks)
-3. If best_ask(Yes) + best_ask(No) < $1.00 after fees → guaranteed profit
+3. If best_ask(Yes) + best_ask(No) < threshold after fees → guaranteed profit
 4. Buy both sides → wait for resolution → collect $1.00 per share pair
 5. Profit = $1.00 - cost_yes - cost_no - fee (per share)
+
+Thresholds:
+- Normal: total_cost < 0.98
+- Near-expiry (<30 min): total_cost < 0.985
 
 Geopolitics/world events = ZERO fees → best arb targets.
 """
 
+from datetime import datetime, timezone
 from core import trader
 from strategies.ev import get_fee_rate, calculate_taker_fee, is_fee_free_market
 from utils.logger import log
 import config
 
+# Arb spread thresholds
+ARB_THRESHOLD_NORMAL = 0.98
+ARB_THRESHOLD_NEAR_EXPIRY = 0.985
+NEAR_EXPIRY_MINUTES = 30
+
 
 def scan_arb_opportunity(market: dict) -> dict | None:
     """Check if a market has an arbitrage opportunity.
 
-    Post Feb 18 2026: uses dynamic fee model per token.
-    Prioritizes fee-free markets (geopolitics) where taker arb is still viable.
-
-    Returns dict with trade details if arb exists, None otherwise.
+    Uses tighter threshold (0.985) for markets < 30 min from resolution.
+    Always requires positive profit after fees.
     """
     question = market.get("question", "")
     token_ids = market.get("token_ids", [])
@@ -50,6 +58,22 @@ def scan_arb_opportunity(market: dict) -> dict | None:
 
     # Total cost to buy 1 share of each side
     total_cost = yes_best_ask + no_best_ask
+
+    # Determine threshold based on time to resolution
+    end_date = market.get("end_date") or market.get("endDate") or ""
+    minutes_left = 999
+    if end_date:
+        try:
+            end_dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+            minutes_left = (end_dt - datetime.now(timezone.utc)).total_seconds() / 60
+        except (ValueError, TypeError):
+            pass
+
+    near_expiry = minutes_left < NEAR_EXPIRY_MINUTES
+    threshold = ARB_THRESHOLD_NEAR_EXPIRY if near_expiry else ARB_THRESHOLD_NORMAL
+
+    if total_cost >= threshold:
+        return None
 
     # === DYNAMIC FEE CALCULATION (post Feb 18, 2026) ===
     # Fee = shares × feeRate × p × (1-p), applied to winning side only
@@ -102,6 +126,9 @@ def scan_arb_opportunity(market: dict) -> dict | None:
         "fee_rate": fee_rate,
         "fee_per_share": max_fee,
         "fee_free": fee_free,
+        "threshold": threshold,
+        "near_expiry": near_expiry,
+        "minutes_left": minutes_left,
     }
 
 
