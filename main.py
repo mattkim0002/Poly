@@ -769,14 +769,9 @@ def run_cycle():
         arb_opportunities = scan_all_markets(markets)
 
         if arb_opportunities:
-            print(f"  Found {len(arb_opportunities)} arb opportunities!")
             for arb in arb_opportunities[:2]:
                 if bankroll < config.MIN_ORDER_SIZE_USD * 2:
                     break
-                thresh_label = f"threshold={arb.get('threshold', 0.98)}"
-                if arb.get("near_expiry"):
-                    thresh_label += " (near expiry)"
-                print(f"  ARB: {arb['question'][:50]} | Yes ${arb['yes_price']:.3f} + No ${arb['no_price']:.3f} = ${arb['total_cost']:.3f} | Profit: {arb['profit_pct']:.1%} | {thresh_label}")
                 result = execute_arb(arb, bankroll)
                 if result:
                     trades_placed += 1
@@ -805,8 +800,7 @@ def run_cycle():
                         edge=result["profit_pct"], kelly_frac=0.0,
                         dd_mult=1.0, signal_mult=1.0,
                     )
-        else:
-            print("[INFO] No arb opportunities (spreads are tight)")
+
 
     # === STRATEGY 2: BINANCE-LAG (directional, Claude Sonnet veto) ===
     if config.ENABLE_BINANCE_LAG and bankroll >= config.MIN_ORDER_SIZE_USD and trades_placed == 0:
@@ -1185,7 +1179,7 @@ def main():
     active = _get_active_strategies()
     print(f"  Active:      {active}")
     from strategies.arbitrage import ARB_THRESHOLD_NORMAL, ARB_THRESHOLD_NEAR_EXPIRY, NEAR_EXPIRY_MINUTES
-    print(f"  Arb:         {'ON' if config.ENABLE_ARB else 'OFF'} (normal<{ARB_THRESHOLD_NORMAL}, expiry<{ARB_THRESHOLD_NEAR_EXPIRY} within {NEAR_EXPIRY_MINUTES}min)")
+    print(f"  Arb:         {'ON' if config.ENABLE_ARB else 'OFF'} (normal<{ARB_THRESHOLD_NORMAL}, near-expiry<{ARB_THRESHOLD_NEAR_EXPIRY} within {NEAR_EXPIRY_MINUTES}min)")
     print(f"  Binance-Lag: {'ON (Sonnet gate)' if config.ENABLE_BINANCE_LAG else 'OFF'}")
     print(f"  Momentum:    {'ON (Sonnet gate)' if config.ENABLE_MOMENTUM_CLAUDE else 'OFF'}")
     print(f"  Sniper:      {'ON' if config.ENABLE_SNIPE else 'OFF'}")

@@ -8,8 +8,8 @@ Strategy:
 5. Profit = $1.00 - cost_yes - cost_no - fee (per share)
 
 Thresholds:
-- Normal: total_cost < 0.98
-- Near-expiry (<30 min): total_cost < 0.985
+- Normal: total_cost < 0.99
+- Near-expiry (<60 min): total_cost < 0.995
 
 Geopolitics/world events = ZERO fees → best arb targets.
 """
@@ -21,16 +21,16 @@ from utils.logger import log
 import config
 
 # Arb spread thresholds
-ARB_THRESHOLD_NORMAL = 0.98
-ARB_THRESHOLD_NEAR_EXPIRY = 0.985
-NEAR_EXPIRY_MINUTES = 30
+ARB_THRESHOLD_NORMAL = 0.99
+ARB_THRESHOLD_NEAR_EXPIRY = 0.995
+NEAR_EXPIRY_MINUTES = 60
 
 
-def scan_arb_opportunity(market: dict) -> dict | None:
-    """Check if a market has an arbitrage opportunity.
+def _evaluate_arb_candidate(market: dict) -> dict | None:
+    """Evaluate a market for arb potential. Returns candidate dict with all stats.
 
-    Uses tighter threshold (0.985) for markets < 30 min from resolution.
-    Always requires positive profit after fees.
+    Returns None only if orderbook is unavailable. Otherwise returns a dict
+    with 'viable' flag indicating whether it passes all checks.
     """
     question = market.get("question", "")
     token_ids = market.get("token_ids", [])
@@ -41,25 +41,20 @@ def scan_arb_opportunity(market: dict) -> dict | None:
     yes_token = token_ids[0]
     no_token = token_ids[1]
 
-    # Get REAL orderbooks — we need actual fillable ask prices, not midpoints
     yes_book = trader.get_orderbook(yes_token)
     no_book = trader.get_orderbook(no_token)
 
     if not yes_book or not no_book or not yes_book.get("asks") or not no_book.get("asks"):
         return None
 
-    # Best ask = cheapest price we can BUY at
     yes_best_ask = yes_book["asks"][0]["price"]
     no_best_ask = no_book["asks"][0]["price"]
-
-    # Available size at best ask
     yes_ask_size = yes_book["asks"][0]["size"]
     no_ask_size = no_book["asks"][0]["size"]
 
-    # Total cost to buy 1 share of each side
     total_cost = yes_best_ask + no_best_ask
 
-    # Determine threshold based on time to resolution
+    # Time to resolution
     end_date = market.get("end_date") or market.get("endDate") or ""
     minutes_left = 999
     if end_date:
@@ -72,43 +67,26 @@ def scan_arb_opportunity(market: dict) -> dict | None:
     near_expiry = minutes_left < NEAR_EXPIRY_MINUTES
     threshold = ARB_THRESHOLD_NEAR_EXPIRY if near_expiry else ARB_THRESHOLD_NORMAL
 
-    if total_cost >= threshold:
-        return None
-
-    # === DYNAMIC FEE CALCULATION (post Feb 18, 2026) ===
-    # Fee = shares × feeRate × p × (1-p), applied to winning side only
-    # For arb, one side always wins → calculate fee on both, take the max
+    # Fee calculation
     fee_free = is_fee_free_market(question)
-
     if fee_free:
-        # Geopolitics = zero fees! Taker arb is fully viable
-        yes_fee_per_share = 0.0
-        no_fee_per_share = 0.0
-        fee_rate = 0.0
+        yes_fee = no_fee = fee_rate = 0.0
     else:
-        # Fetch actual fee rate from Polymarket API
         fee_rate = get_fee_rate(yes_token)
-        yes_fee_per_share = fee_rate * yes_best_ask * (1.0 - yes_best_ask)
-        no_fee_per_share = fee_rate * no_best_ask * (1.0 - no_best_ask)
+        yes_fee = fee_rate * yes_best_ask * (1.0 - yes_best_ask)
+        no_fee = fee_rate * no_best_ask * (1.0 - no_best_ask)
 
-    # Worst-case fee (whichever side wins, we pay that fee)
-    max_fee = max(yes_fee_per_share, no_fee_per_share)
+    max_fee = max(yes_fee, no_fee)
+    net_profit = 1.0 - total_cost - max_fee
 
-    # Payout is always $1.00, minus the fee on the winning side
-    profit_per_share = 1.0 - total_cost - max_fee
-
-    if profit_per_share <= 0:
-        return None
-
-    # How many shares can we buy? Limited by:
-    # 1. Orderbook depth (minimum of yes/no available)
-    # 2. Our bankroll
-    max_shares_by_book = min(yes_ask_size, no_ask_size)
-
-    # Minimum edge threshold
-    profit_pct = profit_per_share / total_cost
-    if profit_pct < config.MIN_ARB_PROFIT:
-        return None
+    # Determine if viable
+    skip_reason = None
+    if total_cost >= threshold:
+        skip_reason = f"total >= {threshold}"
+    elif net_profit <= 0:
+        skip_reason = "negative after fees"
+    elif (net_profit / total_cost) < config.MIN_ARB_PROFIT:
+        skip_reason = f"profit {net_profit/total_cost:.2%} < min {config.MIN_ARB_PROFIT:.2%}"
 
     return {
         "question": question,
@@ -118,9 +96,9 @@ def scan_arb_opportunity(market: dict) -> dict | None:
         "yes_price": yes_best_ask,
         "no_price": no_best_ask,
         "total_cost": total_cost,
-        "profit_per_share": profit_per_share,
-        "profit_pct": profit_pct,
-        "max_shares": max_shares_by_book,
+        "profit_per_share": net_profit,
+        "profit_pct": net_profit / total_cost if total_cost > 0 else 0,
+        "max_shares": min(yes_ask_size, no_ask_size),
         "yes_book_depth": yes_ask_size,
         "no_book_depth": no_ask_size,
         "fee_rate": fee_rate,
@@ -129,22 +107,46 @@ def scan_arb_opportunity(market: dict) -> dict | None:
         "threshold": threshold,
         "near_expiry": near_expiry,
         "minutes_left": minutes_left,
+        "viable": skip_reason is None,
+        "skip_reason": skip_reason,
     }
 
 
 def scan_all_markets(markets: list[dict]) -> list[dict]:
     """Scan all markets for arbitrage opportunities.
 
-    Returns list of arb opportunities sorted by profit %.
+    Logs ALL candidates (viable or not), returns only viable ones sorted by profit %.
     """
     opportunities = []
+    candidates_found = 0
 
     for market in markets:
-        arb = scan_arb_opportunity(market)
-        if arb:
-            opportunities.append(arb)
+        cand = _evaluate_arb_candidate(market)
+        if not cand:
+            continue
 
-    # Sort by profit % descending
+        # Only log markets where spread is remotely close (< loosest threshold)
+        if cand["total_cost"] >= ARB_THRESHOLD_NEAR_EXPIRY:
+            continue
+
+        candidates_found += 1
+        q_short = cand["question"][:40]
+        if cand["viable"]:
+            thresh_label = f"threshold={cand['threshold']}"
+            if cand["near_expiry"]:
+                thresh_label += " (near expiry)"
+            print(f"  [ARB CANDIDATE] {q_short} | yes={cand['yes_price']:.2f} no={cand['no_price']:.2f} "
+                  f"total={cand['total_cost']:.3f} net_after_fees=${cand['profit_per_share']:+.3f} "
+                  f"→ EXECUTE | {thresh_label}")
+            opportunities.append(cand)
+        else:
+            print(f"  [ARB CANDIDATE] {q_short} | yes={cand['yes_price']:.2f} no={cand['no_price']:.2f} "
+                  f"total={cand['total_cost']:.3f} net_after_fees=${cand['profit_per_share']:+.3f} "
+                  f"→ SKIP ({cand['skip_reason']})")
+
+    if candidates_found == 0:
+        print(f"  [ARB] No candidates found (all markets yes+no >= {ARB_THRESHOLD_NEAR_EXPIRY})")
+
     opportunities.sort(key=lambda x: x["profit_pct"], reverse=True)
     return opportunities
 
@@ -154,19 +156,17 @@ def execute_arb(arb: dict, bankroll: float) -> dict | None:
 
     Returns dict with order details or None if failed.
     """
-    # Calculate position size
     max_cost = bankroll * config.ARB_MAX_POSITION_PCT
     cost_per_pair = arb["total_cost"]
 
-    # How many share pairs can we afford?
     max_by_bankroll = max_cost / cost_per_pair if cost_per_pair > 0 else 0
     max_by_book = arb["max_shares"]
 
     shares = min(max_by_bankroll, max_by_book)
-    shares = max(5, int(shares))  # Polymarket minimum 5 shares
+    shares = max(5, int(shares))
 
     total_cost = shares * cost_per_pair
-    if total_cost > bankroll * 0.90:  # Don't use more than 90% of bankroll
+    if total_cost > bankroll * 0.90:
         shares = max(5, int(bankroll * 0.90 / cost_per_pair))
         total_cost = shares * cost_per_pair
 
