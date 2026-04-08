@@ -17,6 +17,7 @@ sys.stderr.reconfigure(line_buffering=True)
 
 import config
 from core import database, market_data, trader, crypto_predictor
+from core.market_filter import check_trade as market_filter_check
 from strategies.risk import calculate_r_multiple, expectancy, drawdown_multiplier, drawdown
 from strategies.arbitrage import scan_all_markets, execute_arb
 from strategies.binance_lag import scan_binance_lag, claude_gate as binance_lag_claude_gate
@@ -631,15 +632,31 @@ def _execute_momentum_trade(trade: dict, bankroll: float) -> bool:
     print(f"  Edge:    {edge:.1%}")
     print(f"  Shares:  {shares} (${cost:.2f})")
 
-    # Claude news gate — reject if news/data contradicts signal
-    direction = "UP" if trade["outcome"] == "Yes" else "DOWN"
     # Detect symbol from question
+    direction = "UP" if trade["outcome"] == "Yes" else "DOWN"
     q_lower = trade["question"].lower()
     symbol = None
+    coin_name = ""
     for coin, sym in crypto_predictor.BINANCE_SYMBOLS.items():
         if coin in q_lower:
             symbol = sym
+            coin_name = coin.upper()
             break
+
+    # Market structure filter
+    if symbol:
+        mf = market_filter_check(symbol, direction)
+        print(f"  [FILTER] {coin_name} trend={mf['trend']['label']} "
+              f"pressure={mf['pressure']['score']:+.2f} {mf['pressure']['label']} "
+              f"danger={mf['danger']}")
+        if not mf["allowed"]:
+            print(f"  [BLOCK] {coin_name} {direction} blocked by {mf['block_reason']}")
+            return False
+        # Pressure/danger need Claude override
+        if mf["needs_claude"]:
+            print(f"  [FILTER] Pressure/danger conflict — requiring Claude approval")
+
+    # Claude news gate — reject if news/data contradicts signal
     if not _claude_news_check(trade["question"], direction, edge,
                               symbol=symbol, poly_price=price):
         print(f"  [BLOCKED] Claude rejected — news/data contradicts signal")
@@ -822,6 +839,15 @@ def run_cycle():
                 print(f"  [BINANCE-LAG] PROPOSED: {cand['coin']} {cand['side']} | "
                       f"move={cand['move_10m']:+.2f}% | Poly={cand['poly_price']:.2f} | "
                       f"edge={cand['edge']:.1%} | vol={cand['vol_ratio']:.1f}x")
+
+                # Market structure filter
+                mf = market_filter_check(cand["symbol"], cand["side"])
+                print(f"  [FILTER] {cand['coin']} trend={mf['trend']['label']} "
+                      f"pressure={mf['pressure']['score']:+.2f} {mf['pressure']['label']} "
+                      f"danger={mf['danger']}")
+                if not mf["allowed"]:
+                    print(f"  [BLOCK] {cand['coin']} {cand['side']} blocked by {mf['block_reason']}")
+                    continue
 
                 # Claude Sonnet veto
                 gate_result = binance_lag_claude_gate(cand)
