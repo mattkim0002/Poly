@@ -20,27 +20,36 @@ SUPPORTED_COINS = {
 }
 
 # Minimum move over 10-15 min to consider a trade
-MIN_MOVE_PCT = 0.35      # 0.35% move required
+MIN_MOVE_PCT = 0.15      # 0.15% move required
 # Polymarket must be cheap relative to our estimate
-MAX_POLY_PRICE = 0.70    # Only buy if Poly price < 70c
-MIN_TRUE_PROB = 0.70     # Our estimate must be >= 70%
+MAX_POLY_PRICE = 0.72    # Only buy if Poly price < 72c
+MIN_TRUE_PROB = 0.60     # Our estimate must be >= 60%
 
 CLAUDE_GATE_SYSTEM = """You are a risk filter for a Polymarket 5-minute crypto trading bot.
 
-The bot detects when Binance price action strongly implies UP or DOWN,
-but Polymarket odds haven't caught up. Your job: decide if this lag is
-real and tradeable, or if it's noise/trap.
+The bot detects when Binance price action implies UP or DOWN, but Polymarket
+odds haven't caught up. Your job: decide if this lag is real and tradeable.
+Be willing to approve MEDIUM confidence trades — the bot needs volume.
+Only reject when something is clearly broken.
 
 Reply with ONLY this JSON:
 {"ok_to_trade": true or false, "reason": "one sentence", "confidence": "low|medium|high"}
 
-Rules:
-1. If the Binance move is < 0.3% over 10 min, REJECT (too weak).
-2. If trend shows lower highs but trade is UP (or higher lows but DOWN), REJECT.
-3. If volume is below average, REJECT (no conviction).
-4. NEVER approve a DOWN trade on SOL or XRP when Binance shows higher highs/lows.
-5. Only approve when: clear directional move, volume confirms, trend aligns, edge >= 5%.
-6. When in doubt, REJECT.
+Hard rejects:
+1. Binance move < 0.10% over 10 min → REJECT (pure noise).
+2. Trend directly contradicts trade (lower highs + UP, or higher lows + DOWN) → REJECT.
+3. Volume < 0.5x average → REJECT (dead market).
+4. NEVER approve a DOWN trade on SOL or XRP when Binance shows higher highs AND higher lows.
+
+Medium-confidence approval is OK when:
+- Directional move >= 0.15% with trend aligned, OR
+- Volume >= 1.0x average with any positive signal, OR
+- Edge >= 5% with no contradiction
+
+High-confidence approval when: strong move (>= 0.3%), volume confirms (>= 1.5x),
+trend clearly aligned, edge >= 8%.
+
+Default to approving medium confidence if the setup is not broken.
 No text outside the JSON."""
 
 
@@ -48,8 +57,10 @@ def scan_binance_lag(markets: list[dict]) -> list[dict]:
     """Scan markets for Binance-lag opportunities.
 
     Returns list of candidate trades with all data for Claude gate.
+    Logs per-coin diagnostics (why skipped) so dry cycles are visible.
     """
     candidates = []
+    seen_symbols: set[str] = set()
 
     for market in markets:
         question = market.get("question", "")
@@ -70,9 +81,15 @@ def scan_binance_lag(markets: list[dict]) -> list[dict]:
         if not symbol:
             continue
 
+        # Only log once per symbol per cycle
+        first_seen = symbol not in seen_symbols
+        seen_symbols.add(symbol)
+
         # Get 15 minutes of 1m candles from Binance
         candles = crypto_predictor._fetch_candles(symbol, "1m", 15)
         if not candles or len(candles) < 10:
+            if first_seen:
+                print(f"  [BINANCE-LAG] {coin_name} → no candle data")
             continue
 
         current_price = candles[-1]["close"]
@@ -99,6 +116,16 @@ def scan_binance_lag(markets: list[dict]) -> list[dict]:
         uptrend = higher_highs or higher_lows
         downtrend = lower_highs or lower_lows
 
+        if first_seen:
+            trend_lbl = "up" if uptrend else ("down" if downtrend else "flat")
+            print(f"  [BINANCE-LAG] {coin_name} move_10m={move_10m:+.2f}% trend={trend_lbl} vol={vol_ratio:.2f}x")
+
+        # Early diagnostic: move too small
+        if abs(move_10m) < MIN_MOVE_PCT:
+            if first_seen:
+                print(f"  [BINANCE-LAG] {coin_name} move={move_10m:+.2f}% → too small (need {MIN_MOVE_PCT}%)")
+            continue
+
         # Get Polymarket prices
         yes_price = trader.get_midpoint(token_ids[0])
         no_price = trader.get_midpoint(token_ids[1])
@@ -109,6 +136,9 @@ def scan_binance_lag(markets: list[dict]) -> list[dict]:
         total_vol = sum(c["volume"] for c in candles[-5:])
         total_buy = sum(c["buy_volume"] for c in candles[-5:])
         buy_pressure = total_buy / total_vol if total_vol > 0 else 0.5
+
+        skip_msg = None
+        added = False
 
         # === UP candidate ===
         if (move_10m >= MIN_MOVE_PCT and uptrend and vol_ratio >= 1.0
@@ -138,10 +168,23 @@ def scan_binance_lag(markets: list[dict]) -> list[dict]:
                     "higher_lows": higher_lows,
                     "binance_price": current_price,
                 })
+                added = True
+            else:
+                skip_msg = f"UP edge={edge:+.1%} true_prob={true_prob:.2f} (need edge>=5%, prob>={MIN_TRUE_PROB})"
+        elif move_10m >= MIN_MOVE_PCT and uptrend:
+            if yes_price >= MAX_POLY_PRICE:
+                skip_msg = f"UP yes={yes_price:.2f} too rich (need <{MAX_POLY_PRICE})"
+            elif vol_ratio < 1.0:
+                skip_msg = f"UP vol={vol_ratio:.2f}x too low"
 
         # === DOWN candidate ===
         # Hard rule: never DOWN on SOL/XRP when uptrend
         if symbol in ("SOLUSDT", "XRPUSDT") and uptrend:
+            if first_seen and not added:
+                if skip_msg:
+                    print(f"  [BINANCE-LAG] {coin_name} {skip_msg}")
+                else:
+                    print(f"  [BINANCE-LAG] {coin_name} DOWN blocked (SOL/XRP + uptrend)")
             continue
 
         if (move_10m <= -MIN_MOVE_PCT and downtrend and vol_ratio >= 1.0
@@ -170,6 +213,17 @@ def scan_binance_lag(markets: list[dict]) -> list[dict]:
                     "higher_lows": higher_lows,
                     "binance_price": current_price,
                 })
+                added = True
+            else:
+                skip_msg = f"DOWN edge={edge:+.1%} true_prob={true_prob:.2f} (need edge>=5%, prob>={MIN_TRUE_PROB})"
+        elif move_10m <= -MIN_MOVE_PCT and downtrend:
+            if no_price >= MAX_POLY_PRICE:
+                skip_msg = f"DOWN no={no_price:.2f} too rich (need <{MAX_POLY_PRICE})"
+            elif vol_ratio < 1.0:
+                skip_msg = f"DOWN vol={vol_ratio:.2f}x too low"
+
+        if first_seen and not added and skip_msg:
+            print(f"  [BINANCE-LAG] {coin_name} {skip_msg}")
 
     # Sort by edge descending
     candidates.sort(key=lambda x: x["edge"], reverse=True)

@@ -21,8 +21,8 @@ from utils.logger import log
 import config
 
 # Arb spread thresholds
-ARB_THRESHOLD_NORMAL = 0.99
-ARB_THRESHOLD_NEAR_EXPIRY = 0.995
+ARB_THRESHOLD_NORMAL = 0.995
+ARB_THRESHOLD_NEAR_EXPIRY = 0.998
 NEAR_EXPIRY_MINUTES = 60
 
 
@@ -119,11 +119,17 @@ def scan_all_markets(markets: list[dict]) -> list[dict]:
     """
     opportunities = []
     candidates_found = 0
+    best_spread = 999.0
+    scanned = 0
 
     for market in markets:
         cand = _evaluate_arb_candidate(market)
         if not cand:
             continue
+
+        scanned += 1
+        if cand["total_cost"] < best_spread:
+            best_spread = cand["total_cost"]
 
         # Only log markets where spread is remotely close (< loosest threshold)
         if cand["total_cost"] >= ARB_THRESHOLD_NEAR_EXPIRY:
@@ -145,7 +151,7 @@ def scan_all_markets(markets: list[dict]) -> list[dict]:
                   f"→ SKIP ({cand['skip_reason']})")
 
     if candidates_found == 0:
-        print(f"  [ARB] No candidates found (all markets yes+no >= {ARB_THRESHOLD_NEAR_EXPIRY})")
+        print(f"  [ARB] {scanned} markets scanned | best spread = {best_spread:.3f} | none under threshold {ARB_THRESHOLD_NEAR_EXPIRY}")
 
     opportunities.sort(key=lambda x: x["profit_pct"], reverse=True)
     return opportunities

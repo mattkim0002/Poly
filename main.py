@@ -832,8 +832,12 @@ def run_cycle():
                 lag_trades = []  # reset so we proceed
 
         if len(lag_trades) < config.BINANCE_LAG_AUTO_DISABLE_TRADES:
-            print("[INFO] [BINANCE-LAG] Scanning for Binance-lag opportunities...")
+            crypto_lag_markets = [m for m in markets if "up or down" in m.get("question", "").lower()]
+            print(f"[INFO] [BINANCE-LAG] Scanning {len(crypto_lag_markets)} up/down markets for lag opportunities...")
             lag_candidates = scan_binance_lag(markets)
+
+            if not lag_candidates:
+                print(f"[INFO] [BINANCE-LAG] No candidates | need >0.15% move, poly<$0.72, edge>=5%")
 
             for cand in lag_candidates[:1]:  # Only best candidate per cycle
                 print(f"  [BINANCE-LAG] PROPOSED: {cand['coin']} {cand['side']} | "
@@ -928,13 +932,13 @@ def run_cycle():
         candle = crypto_predictor.get_candle_position()
         print(f"[INFO] [MOMENTUM] Checking | regime={regime} candle={candle['phase']} ({candle['seconds_elapsed']}s in)")
 
-        if regime in ("trending", "choppy") and candle["phase"] == "entry_window":
+        if regime in ("trending", "choppy"):
             # Only scan crypto up/down markets for momentum
             crypto_markets = [m for m in markets
                               if crypto_predictor.is_crypto_updown_market(m.get("question", ""))]
 
             if crypto_markets:
-                print(f"[INFO] Evaluating {len(crypto_markets)} crypto markets (trending + entry window)...")
+                print(f"[INFO] Evaluating {len(crypto_markets)} crypto markets (regime={regime}, candle={candle['phase']})...")
                 best_trade = None
                 best_edge = 0.0
 
@@ -993,8 +997,8 @@ def run_cycle():
                         result = crypto_predictor.estimate_crypto_probability(question, price, outcome)
                         if not result:
                             continue
-                        # STRICT: only high confidence (3+ boosters)
-                        if result.get("confidence") != "high":
+                        # Allow medium + high confidence
+                        if result.get("confidence") == "low":
                             continue
                         edge = abs(result["probability"] - price)
                         if edge > best_edge and edge >= 0.05:
@@ -1016,10 +1020,9 @@ def run_cycle():
                     _execute_momentum_trade(best_trade, bankroll)
                     trades_placed += 1
                 else:
-                    print("[INFO] No momentum signals pass strict filters")
+                    print("[INFO] [MOMENTUM] No signals found | checked markets, no edge >= 5% at medium+ confidence")
         else:
-            skip_reason = f"regime={regime}" if regime != "trending" else f"candle={candle['phase']}"
-            print(f"[INFO] Momentum skipped ({skip_reason})")
+            print(f"[INFO] [MOMENTUM] Skipped | regime={regime} (need trending or choppy)")
 
     if trades_placed:
         print(f"\n[INFO] {trades_placed} trade(s) placed this cycle")
