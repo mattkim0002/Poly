@@ -7,7 +7,7 @@ Only trades BTC, SOL, XRP on 5-minute "Up or Down" markets.
 """
 
 import json
-from core import crypto_predictor, trader
+from core import crypto_predictor, news, trader
 from utils.logger import log
 
 # Coins this strategy is allowed to trade
@@ -20,36 +20,48 @@ SUPPORTED_COINS = {
 }
 
 # Minimum move over 10-15 min to consider a trade
-MIN_MOVE_PCT = 0.15      # 0.15% move required
+MIN_MOVE_PCT = 0.08      # 0.08% move required (very loose — take more trades)
 # Polymarket must be cheap relative to our estimate
-MAX_POLY_PRICE = 0.72    # Only buy if Poly price < 72c
-MIN_TRUE_PROB = 0.60     # Our estimate must be >= 60%
+MAX_POLY_PRICE = 0.78    # Only buy if Poly price < 78c
+MIN_TRUE_PROB = 0.55     # Our estimate must be >= 55%
+MIN_EDGE = 0.03          # Only need 3% edge
 
 CLAUDE_GATE_SYSTEM = """You are a risk filter for a Polymarket 5-minute crypto trading bot.
 
 The bot detects when Binance price action implies UP or DOWN, but Polymarket
 odds haven't caught up. Your job: decide if this lag is real and tradeable.
-Be willing to approve MEDIUM confidence trades — the bot needs volume.
-Only reject when something is clearly broken.
+
+IMPORTANT: The user wants the bot TAKING TRADES. Default to APPROVING medium
+confidence trades. Only reject when the setup is clearly broken.
+
+Inputs you'll see:
+- binance_price + coinbase_ref_price = two independent exchange feeds
+- cross_exchange_divergence_pct = % difference (oracle check)
+- cross_exchange_agrees = true if within 0.3% (sanity confirmation)
+- recent_headlines = crypto news sentiment context
+- move_10m, volume_ratio, trend, edge
 
 Reply with ONLY this JSON:
-{"ok_to_trade": true or false, "reason": "one sentence", "confidence": "low|medium|high"}
+{"ok_to_trade": true or false, "reason": "one sentence citing data", "confidence": "low|medium|high"}
 
-Hard rejects:
-1. Binance move < 0.10% over 10 min → REJECT (pure noise).
-2. Trend directly contradicts trade (lower highs + UP, or higher lows + DOWN) → REJECT.
-3. Volume < 0.5x average → REJECT (dead market).
-4. NEVER approve a DOWN trade on SOL or XRP when Binance shows higher highs AND higher lows.
+Hard rejects (only these):
+1. Binance move < 0.05% AND no trend signal → REJECT (pure noise).
+2. Trend directly contradicts trade (e.g. clear lower highs + UP trade) → REJECT.
+3. cross_exchange_agrees=false AND divergence > 0.5% → REJECT (Binance glitch).
+4. News headlines show clearly opposing catalyst (e.g. SEC lawsuit just filed, exchange hack) → REJECT.
+5. NEVER approve a DOWN trade on SOL or XRP when Binance shows higher highs AND higher lows.
 
-Medium-confidence approval is OK when:
-- Directional move >= 0.15% with trend aligned, OR
+Approve with MEDIUM confidence when:
+- Move >= 0.08% with trend aligned (or neutral), OR
 - Volume >= 1.0x average with any positive signal, OR
-- Edge >= 5% with no contradiction
+- Edge >= 3% with no contradiction, OR
+- Cross-exchange oracle agrees with Binance
 
-High-confidence approval when: strong move (>= 0.3%), volume confirms (>= 1.5x),
-trend clearly aligned, edge >= 8%.
+Approve with HIGH confidence when: move >= 0.25%, volume >= 1.5x, trend clearly
+aligned, edge >= 6%, coinbase and binance agree, no contradicting news.
 
-Default to approving medium confidence if the setup is not broken.
+When in doubt with reasonable data → APPROVE medium. Do NOT reject over missing
+headlines or missing coinbase data.
 No text outside the JSON."""
 
 
@@ -147,7 +159,7 @@ def scan_binance_lag(markets: list[dict]) -> list[dict]:
             true_prob = min(0.95, 0.55 + abs(move_10m) * 0.15 + (0.05 if higher_highs and higher_lows else 0))
             edge = true_prob - yes_price
 
-            if true_prob >= MIN_TRUE_PROB and edge >= 0.05:
+            if true_prob >= MIN_TRUE_PROB and edge >= MIN_EDGE:
                 candidates.append({
                     "market": market,
                     "question": question,
@@ -170,7 +182,7 @@ def scan_binance_lag(markets: list[dict]) -> list[dict]:
                 })
                 added = True
             else:
-                skip_msg = f"UP edge={edge:+.1%} true_prob={true_prob:.2f} (need edge>=5%, prob>={MIN_TRUE_PROB})"
+                skip_msg = f"UP edge={edge:+.1%} true_prob={true_prob:.2f} (need edge>={MIN_EDGE:.0%}, prob>={MIN_TRUE_PROB})"
         elif move_10m >= MIN_MOVE_PCT and uptrend:
             if yes_price >= MAX_POLY_PRICE:
                 skip_msg = f"UP yes={yes_price:.2f} too rich (need <{MAX_POLY_PRICE})"
@@ -192,7 +204,7 @@ def scan_binance_lag(markets: list[dict]) -> list[dict]:
             true_prob = min(0.95, 0.55 + abs(move_10m) * 0.15 + (0.05 if lower_highs and lower_lows else 0))
             edge = true_prob - no_price
 
-            if true_prob >= MIN_TRUE_PROB and edge >= 0.05:
+            if true_prob >= MIN_TRUE_PROB and edge >= MIN_EDGE:
                 candidates.append({
                     "market": market,
                     "question": question,
@@ -215,7 +227,7 @@ def scan_binance_lag(markets: list[dict]) -> list[dict]:
                 })
                 added = True
             else:
-                skip_msg = f"DOWN edge={edge:+.1%} true_prob={true_prob:.2f} (need edge>=5%, prob>={MIN_TRUE_PROB})"
+                skip_msg = f"DOWN edge={edge:+.1%} true_prob={true_prob:.2f} (need edge>={MIN_EDGE:.0%}, prob>={MIN_TRUE_PROB})"
         elif move_10m <= -MIN_MOVE_PCT and downtrend:
             if no_price >= MAX_POLY_PRICE:
                 skip_msg = f"DOWN no={no_price:.2f} too rich (need <{MAX_POLY_PRICE})"
@@ -233,19 +245,37 @@ def scan_binance_lag(markets: list[dict]) -> list[dict]:
 def claude_gate(candidate: dict) -> dict | None:
     """Send candidate to Claude Sonnet for approval.
 
+    Enriches the payload with:
+    - Cross-exchange reference price (Coinbase as oracle) to validate the move
+    - Recent crypto news headlines (Google News RSS) for sentiment context
+
     Returns parsed JSON result or None on failure.
-    Only approves if ok_to_trade=true AND confidence >= medium.
+    News/reference-price fetch failures NEVER block — they're informational.
     """
     try:
         import anthropic
         client = anthropic.Anthropic()
 
-        payload = json.dumps({
+        # Cross-exchange "oracle" check — Coinbase reference
+        cross = crypto_predictor.get_cross_exchange_agreement(
+            candidate["symbol"], candidate["binance_price"]
+        )
+
+        # News headlines for this coin (best-effort, never blocks)
+        try:
+            headlines = news.fetch_headlines(f"{candidate['coin']} crypto price", max_results=3)
+        except Exception:
+            headlines = []
+
+        payload_dict = {
             "coin": candidate["coin"],
             "side": candidate["side"],
             "polymarket_price": candidate["poly_price"],
             "edge": f"{candidate['edge']:.1%}",
             "binance_price": candidate["binance_price"],
+            "coinbase_ref_price": cross["coinbase_price"],
+            "cross_exchange_divergence_pct": cross["divergence_pct"],
+            "cross_exchange_agrees": cross["agrees"],
             "move_10m": f"{candidate['move_10m']:+.2f}%",
             "move_15m": f"{candidate['move_15m']:+.2f}%",
             "volume_ratio": round(candidate["vol_ratio"], 2),
@@ -254,15 +284,24 @@ def claude_gate(candidate: dict) -> dict | None:
             "higher_highs": candidate["higher_highs"],
             "higher_lows": candidate["higher_lows"],
             "market": candidate["question"][:80],
-        })
+            "recent_headlines": headlines[:3] if headlines else [],
+        }
+
+        payload = json.dumps(payload_dict)
 
         resp = client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=100,
+            max_tokens=150,
             system=CLAUDE_GATE_SYSTEM,
             messages=[{"role": "user", "content": payload}],
         )
         text = resp.content[0].text.strip()
+
+        # Log what we sent for diagnostics
+        cb_str = f"${cross['coinbase_price']}" if cross["coinbase_price"] else "n/a"
+        div_str = f"{cross['divergence_pct']:+.2f}%" if cross["divergence_pct"] is not None else "n/a"
+        log.info("[BINANCE-LAG] Claude input: coinbase=%s divergence=%s headlines=%d",
+                 cb_str, div_str, len(headlines))
 
         try:
             result = json.loads(text)

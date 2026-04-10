@@ -1001,7 +1001,7 @@ def run_cycle():
                         if result.get("confidence") == "low":
                             continue
                         edge = abs(result["probability"] - price)
-                        if edge > best_edge and edge >= 0.05:
+                        if edge > best_edge and edge >= config.MIN_EDGE_CRYPTO:
                             best_edge = edge
                             best_trade = {
                                 "market_id": market["id"],

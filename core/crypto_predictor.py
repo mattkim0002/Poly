@@ -147,6 +147,70 @@ BINANCE_SYMBOLS = {
     "ada": "ADAUSDT",
 }
 
+# Cross-exchange reference (Coinbase) — acts as oracle/second data source
+COINBASE_SYMBOLS = {
+    "BTCUSDT": "BTC-USD",
+    "ETHUSDT": "ETH-USD",
+    "SOLUSDT": "SOL-USD",
+    "XRPUSDT": "XRP-USD",
+    "DOGEUSDT": "DOGE-USD",
+    "ADAUSDT": "ADA-USD",
+}
+
+# 15-second in-memory cache so we don't hammer Coinbase every scan
+_coinbase_cache: dict[str, tuple[float, float]] = {}
+
+
+def get_coinbase_price(binance_symbol: str) -> float | None:
+    """Fetch spot price from Coinbase as a cross-exchange reference.
+
+    Acts as an "oracle" to validate that a Binance move is real market-wide,
+    not a Binance-only glitch. Returns None on any failure (informational only,
+    never blocks a trade).
+    """
+    import time
+    import httpx
+
+    cb_symbol = COINBASE_SYMBOLS.get(binance_symbol)
+    if not cb_symbol:
+        return None
+
+    # Serve from cache if < 15s old
+    now = time.time()
+    cached = _coinbase_cache.get(cb_symbol)
+    if cached and (now - cached[1]) < 15:
+        return cached[0]
+
+    try:
+        url = f"https://api.coinbase.com/v2/prices/{cb_symbol}/spot"
+        resp = httpx.get(url, timeout=3)
+        resp.raise_for_status()
+        data = resp.json()
+        price = float(data["data"]["amount"])
+        _coinbase_cache[cb_symbol] = (price, now)
+        return price
+    except Exception:
+        return None
+
+
+def get_cross_exchange_agreement(binance_symbol: str, binance_price: float) -> dict:
+    """Compare Binance vs Coinbase spot. Returns divergence info.
+
+    Used as context for the Claude gate — NOT a hard blocker. If divergence
+    is > 0.3%, Claude can decide whether to skip or trade anyway.
+    """
+    cb_price = get_coinbase_price(binance_symbol)
+    if cb_price is None or binance_price <= 0:
+        return {"coinbase_price": None, "divergence_pct": None, "agrees": True}
+
+    divergence = (binance_price - cb_price) / cb_price * 100
+    agrees = abs(divergence) < 0.30  # within 0.3% is "agreement"
+    return {
+        "coinbase_price": round(cb_price, 2),
+        "divergence_pct": round(divergence, 3),
+        "agrees": agrees,
+    }
+
 # TradingView symbol mapping (exchange: BINANCE for crypto)
 TV_SYMBOLS = {
     "BTCUSDT": "BTCUSDT",
