@@ -737,9 +737,9 @@ def estimate_crypto_probability(question: str, market_price: float, outcome: str
                  question[:40], htf["details"])
         return None
     if htf["direction"] == "sideways":
-        log.info("REJECT '%s': HTF trend=SIDEWAYS — no clear direction (%s)",
+        log.info("ALLOW '%s': HTF trend=SIDEWAYS — trading 60s momentum without HTF boost (%s)",
                  question[:40], htf["details"])
-        return None
+        # No longer a hard reject — just skip HTF alignment boost. User wants trades.
 
     # HTF alignment confirmed
     # === Confidence boosters ===

@@ -117,16 +117,25 @@ def scan_binance_lag(markets: list[dict]) -> list[dict]:
         recent_vol = sum(c["volume"] for c in candles[-3:]) / 3
         vol_ratio = recent_vol / avg_vol if avg_vol > 0 else 1.0
 
-        # Trend: higher highs/lows or lower highs/lows
+        # Trend: use majority-direction over last 5 candles (not strict monotonic).
+        # Strict monotonic was blocking ~95% of real moves.
         highs = [c["high"] for c in candles[-5:]]
         lows = [c["low"] for c in candles[-5:]]
-        higher_highs = all(highs[i] >= highs[i - 1] for i in range(1, len(highs)))
-        higher_lows = all(lows[i] >= lows[i - 1] for i in range(1, len(lows)))
-        lower_highs = all(highs[i] <= highs[i - 1] for i in range(1, len(highs)))
-        lower_lows = all(lows[i] <= lows[i - 1] for i in range(1, len(lows)))
+        hh_count = sum(1 for i in range(1, len(highs)) if highs[i] >= highs[i - 1])
+        hl_count = sum(1 for i in range(1, len(lows)) if lows[i] >= lows[i - 1])
+        lh_count = sum(1 for i in range(1, len(highs)) if highs[i] <= highs[i - 1])
+        ll_count = sum(1 for i in range(1, len(lows)) if lows[i] <= lows[i - 1])
 
-        uptrend = higher_highs or higher_lows
-        downtrend = lower_highs or lower_lows
+        # Strict flags kept for Claude gate context
+        higher_highs = hh_count >= 3  # 3/4 = majority
+        higher_lows = hl_count >= 3
+        lower_highs = lh_count >= 3
+        lower_lows = ll_count >= 3
+
+        # Net direction — most reliable when 5 candles are choppy
+        net_move = (candles[-1]["close"] - candles[-5]["open"]) / candles[-5]["open"] * 100
+        uptrend = (hh_count >= 2 or hl_count >= 2) and net_move > 0
+        downtrend = (lh_count >= 2 or ll_count >= 2) and net_move < 0
 
         if first_seen:
             trend_lbl = "up" if uptrend else ("down" if downtrend else "flat")

@@ -996,12 +996,18 @@ def run_cycle():
                     for outcome, token_id, price in [("Yes", yes_token, yes_price), ("No", no_token, no_price)]:
                         result = crypto_predictor.estimate_crypto_probability(question, price, outcome)
                         if not result:
+                            # Visible stdout diagnostic so reject reason is in bot.log
+                            print(f"  [MOMENTUM] {question[:30]} {outcome} → rejected by crypto_predictor (see INFO log)")
                             continue
                         # Allow medium + high confidence
                         if result.get("confidence") == "low":
+                            print(f"  [MOMENTUM] {question[:30]} {outcome} → low confidence, skip")
                             continue
                         edge = abs(result["probability"] - price)
-                        if edge > best_edge and edge >= config.MIN_EDGE_CRYPTO:
+                        if edge < config.MIN_EDGE_CRYPTO:
+                            print(f"  [MOMENTUM] {question[:30]} {outcome} @ {price:.2f} prob={result['probability']:.2f} edge={edge:+.1%} < {config.MIN_EDGE_CRYPTO:.0%}")
+                            continue
+                        if edge > best_edge:
                             best_edge = edge
                             best_trade = {
                                 "market_id": market["id"],

@@ -171,8 +171,8 @@ BINANCE_LAG_MIN_EV = 0.0            # Disable if EV goes negative over N trades
 # === Momentum Thresholds ===
 # These determine when Binance data shows a real move vs noise.
 # 0.10% in 60s on BTC = ~$90 move = meaningful for 5-min markets.
-MOMENTUM_THRESHOLD_STRONG = 0.08   # 0.08% in 60s = strong
-MOMENTUM_THRESHOLD_MEDIUM = 0.04   # 0.04% in 60s = medium (catches off-peak moves)
+MOMENTUM_THRESHOLD_STRONG = 0.05   # 0.05% in 60s = strong (was 0.08)
+MOMENTUM_THRESHOLD_MEDIUM = 0.02   # 0.02% in 60s = medium (was 0.04 — catches more)
 MOMENTUM_WINDOW_SECONDS = 60
 VOLUME_SPIKE_THRESHOLD = 2.0       # 2x avg volume confirms move
 
