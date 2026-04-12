@@ -145,6 +145,7 @@ BINANCE_SYMBOLS = {
     "doge": "DOGEUSDT",
     "cardano": "ADAUSDT",
     "ada": "ADAUSDT",
+    "bnb": "BNBUSDT",
 }
 
 # Cross-exchange reference (Coinbase) — acts as oracle/second data source
@@ -155,6 +156,7 @@ COINBASE_SYMBOLS = {
     "XRPUSDT": "XRP-USD",
     "DOGEUSDT": "DOGE-USD",
     "ADAUSDT": "ADA-USD",
+    "BNBUSDT": "BNB-USD",
 }
 
 # 15-second in-memory cache so we don't hammer Coinbase every scan
@@ -333,11 +335,11 @@ def _calc_volume_pressure(candles: list[dict]) -> dict:
 
 
 def is_crypto_updown_market(question: str) -> bool:
-    """Check if this is a 5-minute crypto Up/Down market."""
+    """Check if this is a crypto Up/Down market."""
     q = question.lower()
     return "up or down" in q and any(
         coin in q for coin in ["bitcoin", "ethereum", "solana", "btc", "eth", "sol",
-                               "xrp", "dogecoin", "doge", "cardano", "ada"]
+                               "xrp", "dogecoin", "doge", "cardano", "ada", "bnb"]
     )
 
 

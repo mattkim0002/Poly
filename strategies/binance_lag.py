@@ -17,6 +17,11 @@ SUPPORTED_COINS = {
     "solana": "SOLUSDT",
     "sol": "SOLUSDT",
     "xrp": "XRPUSDT",
+    "ethereum": "ETHUSDT",
+    "eth": "ETHUSDT",
+    "bnb": "BNBUSDT",
+    "dogecoin": "DOGEUSDT",
+    "doge": "DOGEUSDT",
 }
 
 # Minimum move over 10-15 min to consider a trade

@@ -207,19 +207,12 @@ def _is_junk_market(question: str) -> bool:
 
 
 def _is_allowed_market_duration(question: str) -> bool:
-    """Only allow market durations listed in config.ALLOWED_MARKET_DURATIONS.
+    """Filter for crypto up/down markets.
 
-    Blocks hourly, 15-minute, daily markets unless explicitly allowed.
+    Allow ALL crypto up/down markets — Polymarket no longer puts "5 minutes"
+    in the question text. They use time ranges like "3:00PM-3:05PM ET" instead.
     """
-    q_lower = question.lower()
-    # Must be a crypto up/down market
-    if "up or down" not in q_lower:
-        return True  # Non-crypto markets pass through (arb/snipe handle all)
-    # Check if any allowed duration keyword is in the question
-    for duration in config.ALLOWED_MARKET_DURATIONS:
-        if duration.lower() in q_lower:
-            return True
-    return False
+    return True  # All markets pass — strategy-level filters handle the rest
 
 
 def _get_active_strategies() -> list[str]:
@@ -761,7 +754,10 @@ def run_cycle():
     markets = [m for m in markets if _is_allowed_market_duration(m.get("question", ""))]
 
     active = _get_active_strategies()
-    print(f"[INFO] {len(markets)} markets to scan | ACTIVE_STRATEGIES = {active}")
+    crypto_updown = [m for m in markets if "up or down" in m.get("question", "").lower()]
+    crypto_all = [m for m in markets if any(k in m.get("question", "").lower()
+                  for k in ["bitcoin", "btc", "ethereum", "eth", "solana", "sol", "xrp", "bnb", "doge", "crypto"])]
+    print(f"[INFO] {len(markets)} markets to scan ({len(crypto_updown)} up/down, {len(crypto_all)} crypto total) | ACTIVE_STRATEGIES = {active}")
 
     trades_placed = 0
 
@@ -837,7 +833,7 @@ def run_cycle():
             lag_candidates = scan_binance_lag(markets)
 
             if not lag_candidates:
-                print(f"[INFO] [BINANCE-LAG] No candidates | need >0.15% move, poly<$0.72, edge>=5%")
+                print(f"[INFO] [BINANCE-LAG] No candidates found this cycle")
 
             for cand in lag_candidates[:1]:  # Only best candidate per cycle
                 print(f"  [BINANCE-LAG] PROPOSED: {cand['coin']} {cand['side']} | "
@@ -1026,7 +1022,9 @@ def run_cycle():
                     _execute_momentum_trade(best_trade, bankroll)
                     trades_placed += 1
                 else:
-                    print("[INFO] [MOMENTUM] No signals found | checked markets, no edge >= 5% at medium+ confidence")
+                    print("[INFO] [MOMENTUM] No signals found | checked markets, no edge >= 3% at medium+ confidence")
+            else:
+                print("[INFO] [MOMENTUM] No crypto up/down markets found in filtered list")
         else:
             print(f"[INFO] [MOMENTUM] Skipped | regime={regime} (need trending or choppy)")
 
