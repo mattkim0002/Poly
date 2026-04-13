@@ -984,3 +984,42 @@ def estimate_crypto_probability(question: str, market_price: float, outcome: str
         "kelly_mult": kelly_mult,
         "regime": regime,
     }
+
+
+def get_btc_confirmation(direction: str) -> dict:
+    """BTC-leads-alts confirmation: is BTC's 180s move aligned with the proposed direction?
+
+    Use on NON-BTC trades to avoid buying ETH/SOL UP while BTC is dumping. Returns
+    {"agrees": bool, "btc_move_180s_pct": float, "strength": "strong|weak|none"}.
+
+    On any failure returns a neutral-pass result (agrees=True, strength=none) so
+    BTC-API flakiness never blocks trading.
+    """
+    try:
+        m = get_realtime_momentum("BTCUSDT")
+    except Exception:
+        m = None
+    if not m:
+        return {"agrees": True, "btc_move_180s_pct": 0.0, "strength": "none"}
+
+    move = float(m.get("price_change_180s", 0.0))
+    direction = (direction or "").upper()
+
+    if direction == "UP":
+        agrees = move >= -0.05  # Not actively dumping
+        if move >= 0.10:
+            strength = "strong"
+        elif move >= 0.0:
+            strength = "weak"
+        else:
+            strength = "none"
+    else:  # DOWN
+        agrees = move <= 0.05
+        if move <= -0.10:
+            strength = "strong"
+        elif move <= 0.0:
+            strength = "weak"
+        else:
+            strength = "none"
+
+    return {"agrees": agrees, "btc_move_180s_pct": round(move, 3), "strength": strength}

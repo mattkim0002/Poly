@@ -49,7 +49,7 @@ MAX_MARKETS_PER_CYCLE = 50
 # === Strategy Toggles ===
 ENABLE_ARB = True                  # Strategy 1: crypto arb (Yes+No < $1.00)
 ENABLE_MOMENTUM_CLAUDE = True      # Strategy 2: momentum with Claude Sonnet gate
-ENABLE_SNIPE = False               # Strategy 3: resolution sniper (conservative, OFF by default)
+ENABLE_SNIPE = True                # Strategy 3: resolution sniper (0.90-0.96 high-win-rate)
 ENABLE_BINANCE_LAG = True          # Strategy 4: Binance-lag directional (Claude Sonnet veto)
 ENABLE_THRESHOLD = False           # DISABLED — mean-reversion loses on crypto trends
 ENABLE_MOMENTUM_INTRADAY = False   # DISABLED — experimental hourly/15-min markets
@@ -207,6 +207,11 @@ LONGSHOT_CORRECTION = 0.0          # Disabled for crypto
 CLAUDE_MODEL = "claude-sonnet-4-6"
 MAX_CLAUDE_CALLS = 20
 CLAUDE_MAX_TOKENS = 300
+
+# === Macro Bias ===
+# Background thread refreshes a cached global crypto bias (bullish/neutral/bearish)
+# every N seconds. Used as a soft gate for directional strategies.
+MACRO_REFRESH_SEC = 3 * 3600       # 3 hours
 
 # === Order Execution ===
 # Math: 1 cent improvement on a $0.50 market = 2% edge cost.

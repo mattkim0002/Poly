@@ -16,7 +16,7 @@ sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
 import config
-from core import database, market_data, trader, crypto_predictor
+from core import database, market_data, trader, crypto_predictor, news, macro
 from core.market_filter import check_trade as market_filter_check
 from strategies.risk import calculate_r_multiple, expectancy, drawdown_multiplier, drawdown
 from strategies.arbitrage import scan_all_markets, execute_arb
@@ -29,6 +29,45 @@ _daily_pnl = 0.0
 _daily_date = None
 _session_start_bankroll = 0.0
 _dead_tokens = set()
+
+# Post-loss cooldown for Binance-Lag: asset_key -> unix_ts when cooldown expires
+_lag_cooldown_until: dict = {}
+
+# Asset key extraction — normalizes coin references in market questions
+_ASSET_KEYS = [
+    ("bitcoin", "BTC"), ("btc", "BTC"),
+    ("ethereum", "ETH"), ("eth", "ETH"),
+    ("solana", "SOL"), ("sol", "SOL"),
+    ("xrp", "XRP"),
+    ("bnb", "BNB"),
+    ("dogecoin", "DOGE"), ("doge", "DOGE"),
+]
+
+
+def extract_asset_key(question: str):
+    """Return a normalized asset key (BTC/ETH/SOL/XRP/BNB/DOGE) from a market question, or None."""
+    q = (question or "").lower()
+    for needle, key in _ASSET_KEYS:
+        if needle in q:
+            return key
+    return None
+
+
+def is_duplicate_exposure(question: str, outcome: str, open_trades: list) -> bool:
+    """True if any open trade already holds the same asset + same Yes/No direction.
+
+    This blocks the 'bot stacks 3 BTC bets in one candle' pattern that wiped out
+    yesterday's $16 gains. Non-crypto markets (asset key = None) are never blocked.
+    """
+    key = extract_asset_key(question)
+    if not key:
+        return False
+    out = (outcome or "").lower()
+    for t in open_trades:
+        if extract_asset_key(t.get("market_question", "")) == key \
+                and (t.get("outcome") or "").lower() == out:
+            return True
+    return False
 
 
 # ──────────────────────────────────────────────────────────
@@ -512,7 +551,8 @@ def _print_portfolio(bankroll: float, open_trades: list[dict], recent_trades: li
 NEWS_GATE_SYSTEM = """You are a risk filter for a Polymarket 5-minute crypto Up/Down trading bot.
 
 You receive raw data: coin, side (UP/DOWN), Polymarket price, Binance momentum (60s/180s price change,
-volume ratio, buy pressure, acceleration, 1h/4h trend), and orderbook imbalance.
+volume ratio, buy pressure, acceleration, 1h/4h trend), orderbook imbalance, recent_headlines (crypto news),
+and macro_bias (global crypto outlook from a separate 3h analysis).
 
 Your ONLY job: decide if the bot should APPROVE or REJECT this specific trade.
 
@@ -525,12 +565,16 @@ Rules:
 2. If Binance 60s/180s momentum is AGAINST the trade direction → ok_to_trade = false.
 3. If volume ratio < 1.0 (no volume spike) → ok_to_trade = false.
 4. If buy pressure < 0.45 for UP trades or > 0.55 for DOWN trades → ok_to_trade = false.
-5. If signals are mixed, weak, or unclear → ok_to_trade = false.
-6. ONLY ok_to_trade = true when ALL of:
+5. If a recent headline describes a clear opposing catalyst (hack, SEC action, exchange outage) → ok_to_trade = false.
+6. If macro_bias is bearish (high confidence) and side = UP, or bullish (high) and side = DOWN → ok_to_trade = false.
+7. If signals are mixed, weak, or unclear → ok_to_trade = false.
+8. ONLY ok_to_trade = true when ALL of:
    - Binance short-term momentum supports the trade direction
    - Binance 1h and 4h trends are not against it
    - Volume spike confirms the move (ratio >= 1.5)
    - Buy pressure aligns with direction
+   - No contradicting headline
+   - Macro bias is neutral or aligned
    - Edge >= 5%
 
 Be extremely conservative. When in doubt, REJECT.
@@ -570,6 +614,30 @@ def _claude_news_check(question: str, direction: str, edge: float,
             if ob:
                 binance_summary["orderbook_imbalance"] = round(ob.get("imbalance", 0.5), 2)
 
+        # Fetch recent crypto headlines for this coin (best-effort, never blocks)
+        try:
+            coin_label = symbol.replace("USDT", "") if symbol else "Bitcoin"
+            recent_headlines = news.fetch_headlines(f"{coin_label} crypto price", max_results=3)
+        except Exception:
+            recent_headlines = []
+
+        # Current macro bias snapshot
+        try:
+            bias_snapshot = macro.get_macro_bias()
+            macro_payload = {
+                "bias": bias_snapshot.get("bias", "neutral"),
+                "confidence": bias_snapshot.get("confidence", "low"),
+                "reasoning": bias_snapshot.get("reasoning", ""),
+            }
+        except Exception:
+            macro_payload = {"bias": "neutral", "confidence": "low", "reasoning": ""}
+
+        # BTC confirmation (context on whether BTC is dragging alts)
+        try:
+            btc_confirm = crypto_predictor.get_btc_confirmation(direction)
+        except Exception:
+            btc_confirm = {"agrees": True, "btc_move_180s_pct": 0.0, "strength": "none"}
+
         payload = _json.dumps({
             "coin": symbol or "BTC",
             "side": direction,
@@ -577,6 +645,9 @@ def _claude_news_check(question: str, direction: str, edge: float,
             "edge": f"{edge:.1%}",
             "market": question[:80],
             "binance": binance_summary,
+            "recent_headlines": recent_headlines,
+            "macro_bias": macro_payload,
+            "btc_confirmation": btc_confirm,
         })
 
         response = client.messages.create(
@@ -721,10 +792,11 @@ def run_cycle():
     if open_trades:
         _check_existing_positions(open_trades)
 
-    # Daily loss limit
+    # Daily loss limit — use SESSION START equity, not remaining cash, so the
+    # threshold doesn't shrink as we lose money (that made the halt trigger late)
     daily_loss = _session_start_bankroll - total_equity
-    if daily_loss > bankroll * config.DAILY_LOSS_LIMIT_PCT:
-        print(f"[HALT] Daily loss limit hit (${daily_loss:.2f})")
+    if daily_loss > _session_start_bankroll * config.DAILY_LOSS_LIMIT_PCT:
+        print(f"[HALT] Daily loss limit hit (${daily_loss:.2f} vs ${_session_start_bankroll * config.DAILY_LOSS_LIMIT_PCT:.2f} cap)")
         _record_equity(bankroll, live_pos_value)
         _print_portfolio(bankroll, open_trades, recent_trades)
         return
@@ -783,9 +855,16 @@ def run_cycle():
         arb_opportunities = scan_all_markets(markets)
 
         if arb_opportunities:
-            for arb in arb_opportunities[:2]:
+            # Cap to 1 fill per cycle (was 2) to prevent 15-second capital bursts
+            for arb in arb_opportunities[:1]:
                 if bankroll < config.MIN_ORDER_SIZE_USD * 2:
                     break
+                # Duplicate-exposure gate: arb loads BOTH sides, so skip if asset is already held
+                arb_question = arb.get("question", "")
+                arb_asset = extract_asset_key(arb_question)
+                if arb_asset and any(extract_asset_key(t.get("market_question", "")) == arb_asset for t in open_trades):
+                    print(f"  [ARB] BLOCK: already hold {arb_asset}")
+                    continue
                 result = execute_arb(arb, bankroll)
                 if result:
                     trades_placed += 1
@@ -814,6 +893,9 @@ def run_cycle():
                         edge=result["profit_pct"], kelly_frac=0.0,
                         dd_mult=1.0, signal_mult=1.0,
                     )
+                    # Track for in-cycle duplicate-exposure checks of later strategies
+                    open_trades.append({"market_question": f"[ARB-YES] {result['question'][:80]}", "outcome": "Yes"})
+                    open_trades.append({"market_question": f"[ARB-NO] {result['question'][:80]}", "outcome": "No"})
 
 
     # === STRATEGY 2: BINANCE-LAG (directional, Claude Sonnet veto) ===
@@ -840,6 +922,36 @@ def run_cycle():
                 print(f"  [BINANCE-LAG] PROPOSED: {cand['coin']} {cand['side']} | "
                       f"move={cand['move_10m']:+.2f}% | Poly={cand['poly_price']:.2f} | "
                       f"edge={cand['edge']:.1%} | vol={cand['vol_ratio']:.1f}x")
+
+                # Duplicate-exposure gate: don't stack same asset + direction
+                if is_duplicate_exposure(cand["question"], cand["outcome"], open_trades):
+                    print(f"  [BINANCE-LAG] BLOCK: already hold {extract_asset_key(cand['question'])} {cand['outcome']}")
+                    continue
+
+                # Post-loss cooldown: 3-min lockout after a losing LAG trade on the same asset
+                asset_key = extract_asset_key(cand["question"])
+                if asset_key and _lag_cooldown_until.get(asset_key, 0) > time.time():
+                    remain = int(_lag_cooldown_until[asset_key] - time.time())
+                    print(f"  [BINANCE-LAG] SKIP {asset_key}: cooldown active ({remain}s left)")
+                    continue
+
+                # BTC-leads-alts: require BTC 180s move to agree (BTC itself always passes)
+                if cand["coin"] != "BTC":
+                    btc_conf = crypto_predictor.get_btc_confirmation(cand["side"])
+                    if not btc_conf["agrees"]:
+                        print(f"  [BTC-LEAD] BLOCK {cand['coin']} {cand['side']}: "
+                              f"BTC moved {btc_conf['btc_move_180s_pct']:+.2f}% in 180s")
+                        continue
+
+                # Macro bias soft-gate: only block if bias is HIGH-confidence against direction
+                bias = macro.get_macro_bias()
+                if bias.get("confidence") == "high":
+                    if bias.get("bias") == "bearish" and cand["side"] == "UP":
+                        print(f"  [MACRO] BLOCK bearish bias vs UP trade: {bias.get('reasoning','')[:60]}")
+                        continue
+                    if bias.get("bias") == "bullish" and cand["side"] == "DOWN":
+                        print(f"  [MACRO] BLOCK bullish bias vs DOWN trade: {bias.get('reasoning','')[:60]}")
+                        continue
 
                 # Market structure filter
                 mf = market_filter_check(cand["symbol"], cand["side"])
@@ -904,6 +1016,7 @@ def run_cycle():
                     )
                     trades_placed += 1
                     bankroll -= cost
+                    open_trades.append({"market_question": f"[LAG] {cand['question'][:80]}", "outcome": cand["outcome"]})
                 else:
                     print(f"  [BINANCE-LAG] Order FAILED")
 
@@ -917,10 +1030,15 @@ def run_cycle():
             for snipe in snipes[:2]:
                 if bankroll < config.MIN_ORDER_SIZE_USD:
                     break
+                # Duplicate-exposure gate (only blocks crypto snipes that overlap live positions)
+                if is_duplicate_exposure(snipe["question"], snipe["outcome"], open_trades):
+                    print(f"  [SNIPE] BLOCK: duplicate {extract_asset_key(snipe['question'])} {snipe['outcome']}")
+                    continue
                 print(f"  SNIPE: {snipe['question'][:50]} | {snipe['outcome']} @ ${snipe['ask_price']:.3f} | Profit: {snipe['profit_pct']:.1%}")
                 if execute_snipe(snipe, bankroll):
                     trades_placed += 1
                     bankroll -= snipe["ask_price"] * 5  # Approximate cost
+                    open_trades.append({"market_question": snipe["question"], "outcome": snipe["outcome"]})
         else:
             print("[INFO] No snipe opportunities (nothing near-certain at a discount)")
 
@@ -1022,10 +1140,38 @@ def run_cycle():
                             }
 
                 if best_trade:
+                    # Duplicate-exposure gate
+                    if is_duplicate_exposure(best_trade["question"], best_trade["outcome"], open_trades):
+                        print(f"  [MOMENTUM] BLOCK: duplicate {extract_asset_key(best_trade['question'])} {best_trade['outcome']}")
+                        best_trade = None
+
+                # BTC-leads-alts + macro bias for momentum
+                if best_trade:
+                    mom_asset = extract_asset_key(best_trade["question"])
+                    mom_side = "UP" if best_trade["outcome"] == "Yes" else "DOWN"
+                    if mom_asset and mom_asset != "BTC":
+                        btc_conf = crypto_predictor.get_btc_confirmation(mom_side)
+                        if not btc_conf["agrees"]:
+                            print(f"  [BTC-LEAD] BLOCK {mom_asset} {mom_side}: BTC moved {btc_conf['btc_move_180s_pct']:+.2f}%")
+                            best_trade = None
+
+                if best_trade:
+                    bias = macro.get_macro_bias()
+                    if bias.get("confidence") == "high":
+                        mom_side = "UP" if best_trade["outcome"] == "Yes" else "DOWN"
+                        if bias.get("bias") == "bearish" and mom_side == "UP":
+                            print(f"  [MACRO] BLOCK bearish vs UP: {bias.get('reasoning','')[:60]}")
+                            best_trade = None
+                        elif bias.get("bias") == "bullish" and mom_side == "DOWN":
+                            print(f"  [MACRO] BLOCK bullish vs DOWN: {bias.get('reasoning','')[:60]}")
+                            best_trade = None
+
+                if best_trade:
                     combo = best_trade["signal"].get("combo", "?")
                     print(f"  MOMENTUM: {best_trade['question'][:50]} | {best_trade['outcome']} @ {best_trade['price']:.3f} | Edge: {best_trade['edge']:.1%} | combo={combo}")
                     _execute_momentum_trade(best_trade, bankroll)
                     trades_placed += 1
+                    open_trades.append({"market_question": best_trade["question"], "outcome": best_trade["outcome"]})
                 else:
                     print("[INFO] [MOMENTUM] No signals found | checked markets, no edge >= 3% at medium+ confidence")
             else:
@@ -1099,6 +1245,12 @@ def pnl_watcher_thread():
                     status = "won" if real_pnl > 0 else "lost"
                     database.update_trade_result(trade["id"], actual_value / max(trade_size, 1), real_pnl, r_mult, status)
                     print(f"[P&L WATCHER] RESOLVED '{question[:40]}' | {status.upper()} | PnL=${real_pnl:+.2f}")
+                    # Post-loss cooldown for Binance-Lag
+                    if status == "lost" and "[LAG]" in question:
+                        cool_key = extract_asset_key(question)
+                        if cool_key:
+                            _lag_cooldown_until[cool_key] = time.time() + 180
+                            print(f"[COOLDOWN] {cool_key} locked for 3 min after LAG loss")
                     continue
                 if current_price <= 0:
                     continue
@@ -1136,25 +1288,49 @@ def pnl_watcher_thread():
                     should_sell = True
                     reason = f"CUT LOSS ({pnl_pct:+.0%})"
 
+                # Rule 1b: BINANCE REVERSAL (LAG trades only) — exit if Binance
+                # moves sharply against the entry direction during the hold
+                elif "[LAG]" in question:
+                    entry_side = (trade.get("outcome") or "").lower()  # "yes" or "no"
+                    symbol = None
+                    q_lower = question.lower()
+                    for coin, sym in crypto_predictor.BINANCE_SYMBOLS.items():
+                        if coin in q_lower:
+                            symbol = sym
+                            break
+                    if symbol:
+                        try:
+                            m = crypto_predictor.get_realtime_momentum(symbol)
+                            move_180s = (m or {}).get("price_change_180s")
+                        except Exception:
+                            move_180s = None
+                        if move_180s is not None:
+                            if entry_side == "yes" and move_180s <= -0.15:
+                                should_sell = True
+                                reason = f"BINANCE REVERSAL ({move_180s:+.2f}% vs YES)"
+                            elif entry_side == "no" and move_180s >= 0.15:
+                                should_sell = True
+                                reason = f"BINANCE REVERSAL ({move_180s:+.2f}% vs NO)"
+
                 # Rule 2: ABSOLUTE STOP — for 40-60c entries, sell if dropped 10c
                 # (5-min binary markets snap to 0 — catch the move before it completes)
-                elif 0.40 <= entry_price <= 0.60 and current_price <= entry_price - 0.08:
+                if not should_sell and 0.40 <= entry_price <= 0.60 and current_price <= entry_price - 0.08:
                     should_sell = True
                     reason = f"ABS STOP (${entry_price:.2f}→${current_price:.2f})"
 
                 # Rule 3: PRE-RESOLUTION EXIT — <60s left, not winning big
                 # Don't hold through the binary snap unless we're clearly ahead
-                elif minutes_left < 1.0 and pnl_pct < 0.15:
+                if not should_sell and minutes_left < 1.0 and pnl_pct < 0.15:
                     should_sell = True
                     reason = f"PRE-RESOLUTION ({pnl_pct:+.0%}, {minutes_left*60:.0f}s left)"
 
                 # Rule 4: TIME EXIT — held >3min on any market AND losing
-                elif elapsed_min is not None and elapsed_min >= 3.0 and pnl_pct < 0:
+                if not should_sell and elapsed_min is not None and elapsed_min >= 3.0 and pnl_pct < 0:
                     should_sell = True
                     reason = f"TIME EXIT (held {elapsed_min:.1f}min, {pnl_pct:+.0%})"
 
                 # Rule 5: LOCK PROFIT — up 15%+ with <90s left
-                elif minutes_left < 1.5 and pnl_pct >= 0.15:
+                if not should_sell and minutes_left < 1.5 and pnl_pct >= 0.15:
                     should_sell = True
                     reason = f"LOCK PROFIT (+{pnl_pct:.0%}, {minutes_left*60:.0f}s left)"
 
@@ -1188,10 +1364,40 @@ def pnl_watcher_thread():
                     database.update_trade_result(trade["id"], current_price, pnl, r_mult, status)
                     print(f"[P&L WATCHER] Closed: PnL=${pnl:+.2f} | status={status}")
 
+                    # Post-loss cooldown for Binance-Lag: lock asset for 3 minutes
+                    if status == "lost" and "[LAG]" in question:
+                        cool_key = extract_asset_key(question)
+                        if cool_key:
+                            _lag_cooldown_until[cool_key] = time.time() + 180
+                            print(f"[COOLDOWN] {cool_key} locked for 3 min after LAG loss")
+
         except Exception as e:
             print(f"[P&L WATCHER] Error: {e}")
 
         time.sleep(3)
+
+
+def macro_watcher_thread():
+    """Background thread that refreshes the macro bias every MACRO_REFRESH_SEC.
+
+    Synthesizes BTC/ETH/SOL trends + crypto news headlines via Claude Sonnet and
+    caches the result for the directional strategies to soft-gate against.
+    """
+    # Initial refresh on startup so the bot has a bias before the first cycle
+    try:
+        state = macro.refresh_macro_bias()
+        print(f"[MACRO] Initial bias: {state.get('bias')} ({state.get('confidence')}) — {state.get('reasoning','')[:80]}")
+    except Exception as e:
+        print(f"[MACRO] Initial refresh failed: {e}")
+
+    while True:
+        try:
+            time.sleep(config.MACRO_REFRESH_SEC)
+            state = macro.refresh_macro_bias()
+            print(f"[MACRO] Refreshed: {state.get('bias')} ({state.get('confidence')}) — {state.get('reasoning','')[:80]}")
+        except Exception as e:
+            print(f"[MACRO] Refresh failed: {e}")
+            time.sleep(600)  # Retry in 10 min on failure
 
 
 # ──────────────────────────────────────────────────────────
@@ -1278,6 +1484,11 @@ def main():
     watcher = threading.Thread(target=pnl_watcher_thread, daemon=True)
     watcher.start()
     print("[P&L WATCHER] Started — checking every 3 seconds")
+
+    # Start macro bias watcher daemon thread (refreshes global crypto outlook every 3h)
+    macro_thread = threading.Thread(target=macro_watcher_thread, daemon=True)
+    macro_thread.start()
+    print(f"[MACRO WATCHER] Started — refreshing every {config.MACRO_REFRESH_SEC // 60} min")
     print()
 
     while True:
