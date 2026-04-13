@@ -681,6 +681,7 @@ def _execute_momentum_trade(trade: dict, bankroll: float) -> bool:
         market_probability=price,
         edge=edge, kelly_frac=config.KELLY_FRACTION,
         dd_mult=1.0, signal_mult=1.0,
+        end_date=trade.get("end_date", ""),
     )
     return True
 
@@ -899,6 +900,7 @@ def run_cycle():
                         edge=cand["edge"],
                         kelly_frac=config.BINANCE_LAG_MAX_POSITION_PCT,
                         dd_mult=1.0, signal_mult=1.0,
+                        end_date=cand["market"].get("end_date", ""),
                     )
                     trades_placed += 1
                     bankroll -= cost
@@ -974,6 +976,7 @@ def run_cycle():
                                 "price": yes_price, "probability": binance_prob,
                                 "edge": gap, "signal": {"confidence": "high", "combo": "gap", "kelly_mult": 1.0,
                                                          "reasoning": f"Gap={gap:.0%} Binance={binance_prob:.0%}"},
+                                "end_date": market.get("end_date", ""),
                             }
                             continue  # Skip normal momentum for this market
                         elif gap <= -0.20:
@@ -985,6 +988,7 @@ def run_cycle():
                                 "price": no_price, "probability": 1.0 - binance_prob,
                                 "edge": abs(gap), "signal": {"confidence": "high", "combo": "gap", "kelly_mult": 1.0,
                                                               "reasoning": f"Gap={gap:.0%} Binance={binance_prob:.0%}"},
+                                "end_date": market.get("end_date", ""),
                             }
                             continue
 
@@ -1014,6 +1018,7 @@ def run_cycle():
                                 "probability": result["probability"],
                                 "edge": edge,
                                 "signal": result,
+                                "end_date": market.get("end_date", ""),
                             }
 
                 if best_trade:
@@ -1042,20 +1047,31 @@ def run_cycle():
 def pnl_watcher_thread():
     """Background thread that monitors open positions every 3 seconds.
 
-    Sells immediately if:
-    - Down 30% → cut loss
-    - <30s left and losing → time exit
-    - <60s left and up 15%+ → lock profit
+    Exit rules for 5-min crypto binary markets (applied in order):
+    1. CUT LOSS  — down 15% (was 30%, too loose for snap-to-zero markets)
+    2. ABSOLUTE STOP — price dropped 10c from a 40-60c entry (before resolution snap)
+    3. PRE-RESOLUTION EXIT — <60s left, not already up 15% (avoid the binary snap)
+    4. TIME EXIT — past 60% of trade life + losing anything
+    5. LOCK PROFIT — up 15%+ with <90s left
     """
+    last_log_cycle = 0
     while True:
         try:
             open_trades = database.get_open_trades()
+
+            # Periodic visibility: log watcher activity every ~30s even when idle
+            import time as _t
+            now = int(_t.time())
+            if open_trades and (now - last_log_cycle) >= 30:
+                print(f"[P&L WATCHER] monitoring {len(open_trades)} position(s)")
+                last_log_cycle = now
 
             for trade in open_trades:
                 token_id = trade["token_id"]
                 entry_price = trade["entry_price"]
                 question = trade.get("market_question", "")
                 trade_size = trade.get("size", 0)
+                cost = trade.get("cost", entry_price * trade_size)
 
                 if token_id in _dead_tokens:
                     continue
@@ -1063,9 +1079,26 @@ def pnl_watcher_thread():
                 # Get current price (None = dead/settled token)
                 current_price = trader.get_midpoint(token_id)
                 if current_price is None:
+                    # FIX: When token is dead/resolved, check actual Polymarket position value.
+                    # If position value = 0, this was a LOSS of full cost, not breakeven.
                     _dead_tokens.add(token_id)
-                    database.update_trade_result(trade["id"], entry_price, 0.0, 0.0, "closed")
-                    print(f"[P&L WATCHER] Dead token for '{question[:40]}' ({token_id[:20]}...) — marking position closed")
+                    live_positions = trader.get_positions()
+                    actual_value = 0.0
+                    still_held = False
+                    for p in (live_positions or []):
+                        if p.get("asset") == token_id:
+                            still_held = float(p.get("size", 0)) > 0
+                            actual_value = float(p.get("currentValue", 0))
+                            break
+                    if still_held:
+                        # Position still open on Polymarket — probably API blip, keep it
+                        continue
+                    # Position is closed. Calculate real pnl.
+                    real_pnl = actual_value - cost  # if resolved YES, value=size*$1; if NO, value=0
+                    r_mult = calculate_r_multiple(entry_price, actual_value / max(trade_size, 1), entry_price)
+                    status = "won" if real_pnl > 0 else "lost"
+                    database.update_trade_result(trade["id"], actual_value / max(trade_size, 1), real_pnl, r_mult, status)
+                    print(f"[P&L WATCHER] RESOLVED '{question[:40]}' | {status.upper()} | PnL=${real_pnl:+.2f}")
                     continue
                 if current_price <= 0:
                     continue
@@ -1073,15 +1106,9 @@ def pnl_watcher_thread():
                 # Calculate P&L percentage
                 pnl_pct = (current_price - entry_price) / entry_price if entry_price > 0 else 0
 
-                # Calculate minutes left from market end date
+                # Calculate minutes left from market end date (now stored in DB)
                 end_date = trade.get("end_date") or ""
-                minutes_left = 999  # Default: far from expiry
-                if not end_date:
-                    # Try to extract from question for 5-min markets
-                    # Fall back to candle position
-                    candle = crypto_predictor.get_candle_position()
-                    minutes_left = candle["seconds_remaining"] / 60
-
+                minutes_left = 999  # Default: unknown
                 if end_date:
                     try:
                         end_dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
@@ -1089,26 +1116,50 @@ def pnl_watcher_thread():
                     except (ValueError, TypeError):
                         pass
 
+                # Calculate elapsed time since entry (fallback when end_date missing)
+                elapsed_min = None
+                created_at = trade.get("created_at")
+                if created_at:
+                    try:
+                        cr_dt = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+                        if cr_dt.tzinfo is None:
+                            cr_dt = cr_dt.replace(tzinfo=timezone.utc)
+                        elapsed_min = (datetime.now(timezone.utc) - cr_dt).total_seconds() / 60
+                    except (ValueError, TypeError):
+                        pass
+
                 should_sell = False
                 reason = ""
 
-                # Rule 1: Down 30% → cut loss
-                if pnl_pct <= -0.30:
+                # Rule 1: HARD STOP — down 15% (tightened from 30%)
+                if pnl_pct <= -0.15:
                     should_sell = True
-                    reason = f"CUT LOSS ({pnl_pct:.0%})"
+                    reason = f"CUT LOSS ({pnl_pct:+.0%})"
 
-                # Rule 2: <30s left and losing → time exit
-                elif minutes_left < 0.5 and pnl_pct < 0:
+                # Rule 2: ABSOLUTE STOP — for 40-60c entries, sell if dropped 10c
+                # (5-min binary markets snap to 0 — catch the move before it completes)
+                elif 0.40 <= entry_price <= 0.60 and current_price <= entry_price - 0.08:
                     should_sell = True
-                    reason = f"TIME EXIT (losing {pnl_pct:.0%}, {minutes_left*60:.0f}s left)"
+                    reason = f"ABS STOP (${entry_price:.2f}→${current_price:.2f})"
 
-                # Rule 3: <60s left and up 15%+ → lock profit
-                elif minutes_left < 1.0 and pnl_pct >= 0.15:
+                # Rule 3: PRE-RESOLUTION EXIT — <60s left, not winning big
+                # Don't hold through the binary snap unless we're clearly ahead
+                elif minutes_left < 1.0 and pnl_pct < 0.15:
+                    should_sell = True
+                    reason = f"PRE-RESOLUTION ({pnl_pct:+.0%}, {minutes_left*60:.0f}s left)"
+
+                # Rule 4: TIME EXIT — held >3min on any market AND losing
+                elif elapsed_min is not None and elapsed_min >= 3.0 and pnl_pct < 0:
+                    should_sell = True
+                    reason = f"TIME EXIT (held {elapsed_min:.1f}min, {pnl_pct:+.0%})"
+
+                # Rule 5: LOCK PROFIT — up 15%+ with <90s left
+                elif minutes_left < 1.5 and pnl_pct >= 0.15:
                     should_sell = True
                     reason = f"LOCK PROFIT (+{pnl_pct:.0%}, {minutes_left*60:.0f}s left)"
 
                 if should_sell:
-                    print(f"[P&L WATCHER] SELL '{question[:40]}' | price=${current_price:.3f} | pnl={pnl_pct:+.0%} | {reason}")
+                    print(f"[P&L WATCHER] SELL '{question[:40]}' | ${entry_price:.2f}→${current_price:.2f} | pnl={pnl_pct:+.0%} | {reason}")
 
                     # Get real position size from Polymarket
                     live_positions = trader.get_positions()
@@ -1122,11 +1173,13 @@ def pnl_watcher_thread():
                         sell_price = max(0.01, min(0.99, round(current_price - 0.01, 2)))
                         try:
                             trader.place_limit_order(token_id, sell_price, real_size, "SELL")
+                            print(f"[P&L WATCHER] Sell order placed @ ${sell_price:.2f} x {real_size:.1f}")
                         except Exception as e:
                             if "400" in str(e) or "balance" in str(e).lower():
-                                print(f"[P&L WATCHER] CRITICAL — sell failed, insufficient balance, position still open")
+                                print(f"[P&L WATCHER] CRITICAL — sell failed (balance), position still open: {e}")
                                 continue
-                            raise
+                            print(f"[P&L WATCHER] Sell error: {e}")
+                            continue
 
                     # Update DB
                     pnl = (current_price - entry_price) * real_size

@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS trades (
     exit_price REAL,
     pnl REAL,
     r_multiple REAL,
+    end_date TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     closed_at TIMESTAMP
 );
@@ -70,6 +71,14 @@ def get_connection() -> sqlite3.Connection:
 def init_db():
     conn = get_connection()
     conn.executescript(SCHEMA)
+    # Migrate existing DBs: add end_date column if missing
+    try:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(trades)").fetchall()}
+        if "end_date" not in cols:
+            conn.execute("ALTER TABLE trades ADD COLUMN end_date TEXT")
+            log.info("Migrated trades table: added end_date column")
+    except sqlite3.Error as e:
+        log.warning("Schema migration check failed: %s", e)
     conn.commit()
     conn.close()
     log.info("Database initialized at %s", config.DB_PATH)
@@ -91,6 +100,7 @@ def record_trade(
     kelly_frac: float,
     dd_mult: float,
     signal_mult: float,
+    end_date: str = "",
 ) -> int:
     conn = get_connection()
     cur = conn.execute(
@@ -98,13 +108,13 @@ def record_trade(
            (market_id, market_question, token_id, side, outcome,
             entry_price, size, cost, order_id,
             claude_probability, market_probability, edge,
-            kelly_fraction, dd_multiplier, signal_multiplier)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            kelly_fraction, dd_multiplier, signal_multiplier, end_date)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             market_id, market_question, token_id, side, outcome,
             entry_price, size, cost, order_id,
             claude_probability, market_probability, edge,
-            kelly_frac, dd_mult, signal_mult,
+            kelly_frac, dd_mult, signal_mult, end_date,
         ),
     )
     conn.commit()
