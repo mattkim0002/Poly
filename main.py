@@ -1094,7 +1094,13 @@ def run_cycle():
                         gap = binance_prob - yes_price
                         print(f"  [GAP SIGNAL] {question[:40]} | Binance={binance_prob:.0%} Polymarket={yes_price:.0%} Gap={gap:+.0%}")
 
-                        if gap >= 0.20:
+                        # Price-band filter: skip "lottery ticket" markets where Polymarket
+                        # is already pricing one side near-certain. Below 0.25 / above 0.75
+                        # means the market knows something — the "gap" is fake, not edge.
+                        # (Caught the Solana 3.2¢ Down trade that lost 142 shares.)
+                        if yes_price < 0.25 or yes_price > 0.75:
+                            print(f"  [GAP] SKIP {question[:40]}: price {yes_price:.2f} outside 0.25-0.75 band (market already decided)")
+                        elif gap >= 0.20:
                             # Binance says UP but Polymarket still cheap — BUY YES
                             best_edge = gap
                             best_trade = {
@@ -1121,6 +1127,10 @@ def run_cycle():
 
                     # Fallback: normal momentum check
                     for outcome, token_id, price in [("Yes", yes_token, yes_price), ("No", no_token, no_price)]:
+                        # Skip lottery-ticket prices — same logic as gap path
+                        if price < 0.25 or price > 0.75:
+                            print(f"  [MOMENTUM] SKIP {question[:30]} {outcome} @ {price:.2f}: outside 0.25-0.75 band")
+                            continue
                         result = crypto_predictor.estimate_crypto_probability(question, price, outcome)
                         if not result:
                             # Visible stdout diagnostic so reject reason is in bot.log

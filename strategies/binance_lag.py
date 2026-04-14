@@ -158,6 +158,11 @@ def scan_binance_lag(markets: list[dict]) -> list[dict]:
         if not yes_price or not no_price:
             continue
 
+        # Price-band filter: if either side is < 0.25 or > 0.75, market is
+        # already decided. Skip — the "lag" is fake, not edge.
+        if not (0.25 <= yes_price <= 0.75 and 0.25 <= no_price <= 0.75):
+            continue
+
         # Buy pressure
         total_vol = sum(c["volume"] for c in candles[-5:])
         total_buy = sum(c["buy_volume"] for c in candles[-5:])
