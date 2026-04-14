@@ -953,6 +953,15 @@ def run_cycle():
                         print(f"  [MACRO] BLOCK bullish bias vs DOWN trade: {bias.get('reasoning','')[:60]}")
                         continue
 
+                # Polymarket orderbook flow: are real buyers stacked on this token?
+                # Block if sellers clearly dominate the depth we're trying to buy into.
+                flow = trader.get_orderbook_flow(cand["token_id"])
+                print(f"  [FLOW] {cand['coin']} {cand['outcome']} "
+                      f"buy_ratio={flow['buy_ratio']:.2f} ({flow['signal']})")
+                if flow["signal"] == "selling":
+                    print(f"  [FLOW] BLOCK {cand['coin']} {cand['outcome']}: sellers dominate orderbook")
+                    continue
+
                 # Market structure filter
                 mf = market_filter_check(cand["symbol"], cand["side"])
                 print(f"  [FILTER] {cand['coin']} trend={mf['trend']['label']} "
@@ -1165,6 +1174,13 @@ def run_cycle():
                         elif bias.get("bias") == "bullish" and mom_side == "DOWN":
                             print(f"  [MACRO] BLOCK bullish vs DOWN: {bias.get('reasoning','')[:60]}")
                             best_trade = None
+
+                if best_trade:
+                    flow = trader.get_orderbook_flow(best_trade["token_id"])
+                    print(f"  [FLOW] {best_trade['outcome']} buy_ratio={flow['buy_ratio']:.2f} ({flow['signal']})")
+                    if flow["signal"] == "selling":
+                        print(f"  [FLOW] BLOCK momentum: sellers dominate orderbook")
+                        best_trade = None
 
                 if best_trade:
                     combo = best_trade["signal"].get("combo", "?")
