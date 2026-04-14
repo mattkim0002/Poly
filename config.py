@@ -49,7 +49,7 @@ MAX_MARKETS_PER_CYCLE = 50
 # === Strategy Toggles ===
 ENABLE_ARB = True                  # Strategy 1: crypto arb (Yes+No < $1.00)
 ENABLE_MOMENTUM_CLAUDE = True      # Strategy 2: momentum with Claude Sonnet gate
-ENABLE_SNIPE = True                # Strategy 3: resolution sniper (0.90-0.96 high-win-rate)
+ENABLE_SNIPE = False               # DISABLED — buys at fair-value, structurally -EV after fees
 ENABLE_BINANCE_LAG = True          # Strategy 4: Binance-lag directional (Claude Sonnet veto)
 ENABLE_THRESHOLD = False           # DISABLED — mean-reversion loses on crypto trends
 ENABLE_MOMENTUM_INTRADAY = False   # DISABLED — experimental hourly/15-min markets

@@ -1318,14 +1318,16 @@ def pnl_watcher_thread():
                     should_sell = True
                     reason = f"ABS STOP (${entry_price:.2f}→${current_price:.2f})"
 
-                # Rule 3: PRE-RESOLUTION EXIT — <60s left, not winning big
-                # Don't hold through the binary snap unless we're clearly ahead
-                if not should_sell and minutes_left < 1.0 and pnl_pct < 0.15:
+                # Rule 3: PRE-RESOLUTION EXIT — <60s left and clearly losing
+                # 5-min binaries snap to $0 or $1; only bail late if already underwater >5%.
+                # (Old rule exited any trade not up 15% — capped winners' upside at +14%.)
+                if not should_sell and minutes_left < 1.0 and pnl_pct < -0.05:
                     should_sell = True
                     reason = f"PRE-RESOLUTION ({pnl_pct:+.0%}, {minutes_left*60:.0f}s left)"
 
-                # Rule 4: TIME EXIT — held >3min on any market AND losing
-                if not should_sell and elapsed_min is not None and elapsed_min >= 3.0 and pnl_pct < 0:
+                # Rule 4: TIME EXIT — held >3min AND losing >5%
+                # (Old rule fired on any pnl<0; killed brief dips that would have resolved up.)
+                if not should_sell and elapsed_min is not None and elapsed_min >= 3.0 and pnl_pct < -0.05:
                     should_sell = True
                     reason = f"TIME EXIT (held {elapsed_min:.1f}min, {pnl_pct:+.0%})"
 

@@ -76,8 +76,9 @@ def _evaluate_arb_candidate(market: dict) -> dict | None:
         yes_fee = fee_rate * yes_best_ask * (1.0 - yes_best_ask)
         no_fee = fee_rate * no_best_ask * (1.0 - no_best_ask)
 
-    max_fee = max(yes_fee, no_fee)
-    net_profit = 1.0 - total_cost - max_fee
+    # Arb buys BOTH legs, so we pay BOTH fees (max() was a 50% under-count).
+    fee_pair = yes_fee + no_fee
+    net_profit = 1.0 - total_cost - fee_pair
 
     # Determine if viable
     skip_reason = None
@@ -102,7 +103,7 @@ def _evaluate_arb_candidate(market: dict) -> dict | None:
         "yes_book_depth": yes_ask_size,
         "no_book_depth": no_ask_size,
         "fee_rate": fee_rate,
-        "fee_per_share": max_fee,
+        "fee_per_share": fee_pair,
         "fee_free": fee_free,
         "threshold": threshold,
         "near_expiry": near_expiry,
