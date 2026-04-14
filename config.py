@@ -64,6 +64,18 @@ MIN_LIQUIDITY = 50
 MAX_RESOLUTION_MINUTES = 10        # Only 5-min crypto markets (with small buffer)
 MIN_RESOLUTION_MINUTES = 1.5       # Matches candle filter (entry_window + mid_candle)
 
+# === Hard Filters (applied before any strategy logic) ===
+# Anti-lottery-ticket: skip any market where any outcome is priced below this.
+# Cheap contracts are cheap because the market already knows the answer.
+MIN_PRICE_FLOOR = 0.15
+
+# Anti-coinflip: skip any "Up or Down" market resolving sooner than this.
+# 5-min binaries are too close to coin flips with adverse fill bias.
+# NOTE: setting this > 0 with ALLOWED_MARKET_DURATIONS = ["5 minutes"] will
+# block ALL current trading. Loosen ALLOWED_MARKET_DURATIONS or reduce this
+# to 0 if you want the old 5-min behavior.
+MIN_RESOLUTION_HOURS = 4.0
+
 # === Arbitrage Settings ===
 MIN_ARB_PROFIT = 0.005
 ARB_MAX_POSITION_PCT = 0.40

@@ -254,6 +254,45 @@ def _is_allowed_market_duration(question: str) -> bool:
     return True  # All markets pass — strategy-level filters handle the rest
 
 
+def _hard_filter_market(market: dict) -> tuple[bool, str]:
+    """Hard filters applied before any strategy touches the market.
+
+    Returns (passes, reason). Reason is a short human-readable skip string.
+
+    Filters:
+      1) Anti-coinflip: "Up or Down" markets must resolve in >= MIN_RESOLUTION_HOURS.
+      2) Anti-lottery-ticket: no contract priced below MIN_PRICE_FLOOR.
+    """
+    question = market.get("question", "") or ""
+    q_lower = question.lower()
+
+    # 1) Resolution-time filter for Up/Down markets
+    if "up or down" in q_lower:
+        end_date = market.get("end_date") or ""
+        if end_date:
+            try:
+                from datetime import datetime, timezone
+                end_dt = datetime.fromisoformat(str(end_date).replace("Z", "+00:00"))
+                hours_left = (end_dt - datetime.now(timezone.utc)).total_seconds() / 3600.0
+                if hours_left < config.MIN_RESOLUTION_HOURS:
+                    mins_left = hours_left * 60.0
+                    return (False, f"resolves in {mins_left:.0f} min (under {config.MIN_RESOLUTION_HOURS:.0f}h minimum)")
+            except (ValueError, TypeError):
+                pass  # Unparseable end_date → let strategy logic handle it
+
+    # 2) Price-floor filter: any contract below MIN_PRICE_FLOOR → skip market
+    prices = market.get("outcome_prices") or []
+    for price in prices:
+        try:
+            p = float(price)
+        except (TypeError, ValueError):
+            continue
+        if 0 < p < config.MIN_PRICE_FLOOR:
+            return (False, f"price {p*100:.1f}\u00a2 below {config.MIN_PRICE_FLOOR*100:.0f}\u00a2 minimum")
+
+    return (True, "")
+
+
 def _get_active_strategies() -> list[str]:
     """Return list of currently enabled strategy names."""
     active = []
@@ -825,6 +864,17 @@ def run_cycle():
 
     # Filter out non-allowed durations (blocks hourly/15-min crypto markets)
     markets = [m for m in markets if _is_allowed_market_duration(m.get("question", ""))]
+
+    # Hard filters (lottery-ticket prices + coinflip durations) — logged so you see skips
+    hard_filtered = []
+    for m in markets:
+        passes, reason = _hard_filter_market(m)
+        if not passes:
+            q_short = (m.get("question", "") or "")[:50]
+            print(f"  [FILTER] SKIP {q_short} — {reason}")
+            continue
+        hard_filtered.append(m)
+    markets = hard_filtered
 
     active = _get_active_strategies()
     crypto_updown = [m for m in markets if "up or down" in m.get("question", "").lower()]
