@@ -26,6 +26,7 @@ SUPPORTED_COINS = {
 
 # Minimum move over 10-15 min to consider a trade
 MIN_MOVE_PCT = 0.08      # 0.08% move required (very loose — take more trades)
+MIN_VOL_RATIO = 0.8      # Volume ratio floor — loosened from 1.0 for low-vol regimes
 # Polymarket must be cheap relative to our estimate
 MAX_POLY_PRICE = 0.78    # Only buy if Poly price < 78c
 MIN_TRUE_PROB = 0.55     # Our estimate must be >= 55%
@@ -172,7 +173,7 @@ def scan_binance_lag(markets: list[dict]) -> list[dict]:
         added = False
 
         # === UP candidate ===
-        if (move_10m >= MIN_MOVE_PCT and uptrend and vol_ratio >= 1.0
+        if (move_10m >= MIN_MOVE_PCT and uptrend and vol_ratio >= MIN_VOL_RATIO
                 and yes_price < MAX_POLY_PRICE):
             # Estimate true prob based on move magnitude + trend
             true_prob = min(0.95, 0.55 + abs(move_10m) * 0.15 + (0.05 if higher_highs and higher_lows else 0))
@@ -205,8 +206,8 @@ def scan_binance_lag(markets: list[dict]) -> list[dict]:
         elif move_10m >= MIN_MOVE_PCT and uptrend:
             if yes_price >= MAX_POLY_PRICE:
                 skip_msg = f"UP yes={yes_price:.2f} too rich (need <{MAX_POLY_PRICE})"
-            elif vol_ratio < 1.0:
-                skip_msg = f"UP vol={vol_ratio:.2f}x too low"
+            elif vol_ratio < MIN_VOL_RATIO:
+                skip_msg = f"UP vol={vol_ratio:.2f}x too low (need >={MIN_VOL_RATIO})"
 
         # === DOWN candidate ===
         # Hard rule: never DOWN on SOL/XRP when uptrend
@@ -218,7 +219,7 @@ def scan_binance_lag(markets: list[dict]) -> list[dict]:
                     print(f"  [BINANCE-LAG] {coin_name} DOWN blocked (SOL/XRP + uptrend)")
             continue
 
-        if (move_10m <= -MIN_MOVE_PCT and downtrend and vol_ratio >= 1.0
+        if (move_10m <= -MIN_MOVE_PCT and downtrend and vol_ratio >= MIN_VOL_RATIO
                 and no_price < MAX_POLY_PRICE):
             true_prob = min(0.95, 0.55 + abs(move_10m) * 0.15 + (0.05 if lower_highs and lower_lows else 0))
             edge = true_prob - no_price
@@ -250,8 +251,8 @@ def scan_binance_lag(markets: list[dict]) -> list[dict]:
         elif move_10m <= -MIN_MOVE_PCT and downtrend:
             if no_price >= MAX_POLY_PRICE:
                 skip_msg = f"DOWN no={no_price:.2f} too rich (need <{MAX_POLY_PRICE})"
-            elif vol_ratio < 1.0:
-                skip_msg = f"DOWN vol={vol_ratio:.2f}x too low"
+            elif vol_ratio < MIN_VOL_RATIO:
+                skip_msg = f"DOWN vol={vol_ratio:.2f}x too low (need >={MIN_VOL_RATIO})"
 
         if first_seen and not added and skip_msg:
             print(f"  [BINANCE-LAG] {coin_name} {skip_msg}")
