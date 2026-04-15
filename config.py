@@ -77,8 +77,10 @@ MIN_PRICE_FLOOR = 0.15
 MIN_RESOLUTION_HOURS = 1.0
 
 # Crypto-only mode: if True, skip any market whose question doesn't contain
-# a crypto keyword. Keeps arb + endgame focused on crypto markets only.
-CRYPTO_ONLY = True
+# a crypto keyword. OFF because ARB + ENDGAME strategies don't work on
+# crypto Up/Down binaries — they need markets with clear resolution and
+# tight spreads (sports finals, political calls, geopolitics, weather).
+CRYPTO_ONLY = False
 
 # Tight crypto keyword set — only unambiguous terms.
 # Short/generic tokens like "sol", "dot", "link", "eth", "ada" would
