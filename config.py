@@ -110,15 +110,15 @@ _CRYPTO_REGEX = r"\b(" + "|".join(_re.escape(k) for k in sorted(CRYPTO_KEYWORDS,
 
 # === Arbitrage Settings ===
 # Net edge target: 1-3% of committed capital, after fees + spread + slippage.
-# Reject if net < 1% or liquidity is too thin.
-MIN_ARB_PROFIT = 0.01              # 1% minimum net edge (tightened from 0.005)
+# Reject if net < 0.5% or liquidity is too thin.
+MIN_ARB_PROFIT = 0.005             # 0.5% minimum net edge (loosened to get more fills)
 ARB_MAX_POSITION_PCT = 0.15        # 15% of bankroll per arb (~$5 at $35 bankroll)
 ARB_SLIPPAGE_BUFFER = 0.003        # 0.3c per share slippage cushion
 
 # === Endgame / Resolution Sniper Settings ===
-# Near-resolution contracts priced 0.95-0.99 with Claude validation of the
-# resolution criteria + external data. Same net-edge target as arb (1-3%).
-ENDGAME_PRICE_MIN = 0.93           # Buy floor
+# Near-resolution contracts priced 0.85-0.99 with Claude validation of the
+# resolution criteria + external data. Same net-edge target as arb.
+ENDGAME_PRICE_MIN = 0.85           # Buy floor (widened from 0.93 for more candidates)
 ENDGAME_PRICE_MAX = 0.99           # Buy ceiling
 ENDGAME_MIN_NET_EDGE = 0.01        # 1% minimum net edge after all costs
 ENDGAME_SLIPPAGE_BUFFER = 0.003    # 0.3c per share
