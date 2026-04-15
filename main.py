@@ -260,11 +260,17 @@ def _hard_filter_market(market: dict) -> tuple[bool, str]:
     Returns (passes, reason). Reason is a short human-readable skip string.
 
     Filters:
-      1) Anti-coinflip: "Up or Down" markets must resolve in >= MIN_RESOLUTION_HOURS.
-      2) Anti-lottery-ticket: no contract priced below MIN_PRICE_FLOOR.
+      1) Crypto-only: if CRYPTO_ONLY, skip markets with no crypto keyword.
+      2) Anti-coinflip: "Up or Down" markets must resolve in >= MIN_RESOLUTION_HOURS.
+      3) Anti-lottery-ticket: no contract priced below MIN_PRICE_FLOOR.
     """
     question = market.get("question", "") or ""
     q_lower = question.lower()
+
+    # 0) Crypto-only filter (runs first — cheapest)
+    if getattr(config, "CRYPTO_ONLY", False):
+        if not any(k in q_lower for k in config.CRYPTO_KEYWORDS):
+            return (False, "not crypto")
 
     # 1) Resolution-time filter for Up/Down markets
     if "up or down" in q_lower:

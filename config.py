@@ -75,6 +75,28 @@ MIN_PRICE_FLOOR = 0.15
 # short-duration noise. Set to 0 to allow 5-min markets again.
 MIN_RESOLUTION_HOURS = 1.0
 
+# Crypto-only mode: if True, skip any market whose question doesn't contain
+# a crypto keyword. Keeps the bot focused on what it understands.
+CRYPTO_ONLY = True
+CRYPTO_KEYWORDS = {
+    "bitcoin", "btc",
+    "ethereum", "eth",
+    "solana", "sol",
+    "xrp", "ripple",
+    "dogecoin", "doge",
+    "cardano", "ada",
+    "bnb", "binance coin",
+    "polygon", "matic",
+    "avalanche", "avax",
+    "chainlink", "link",
+    "litecoin", "ltc",
+    "shiba", "shib",
+    "polkadot", "dot",
+    "tron", "trx",
+    "crypto", "altcoin", "stablecoin",
+    "usdc", "usdt", "tether",
+}
+
 # === Arbitrage Settings ===
 MIN_ARB_PROFIT = 0.005
 ARB_MAX_POSITION_PCT = 0.40
