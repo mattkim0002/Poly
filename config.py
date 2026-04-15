@@ -79,24 +79,34 @@ MIN_RESOLUTION_HOURS = 1.0
 # Crypto-only mode: if True, skip any market whose question doesn't contain
 # a crypto keyword. Keeps arb + endgame focused on crypto markets only.
 CRYPTO_ONLY = True
+
+# Tight crypto keyword set — only unambiguous terms.
+# Short/generic tokens like "sol", "dot", "link", "eth", "ada" would
+# false-positive on normal English (solution, spot, sunlight, ether, canada).
+# If a coin is only known by a short ticker, we skip it rather than risk
+# leaking sports/politics markets through.
 CRYPTO_KEYWORDS = {
     "bitcoin", "btc",
-    "ethereum", "eth",
-    "solana", "sol",
+    "ethereum",
+    "solana",
     "xrp", "ripple",
-    "dogecoin", "doge",
-    "cardano", "ada",
-    "bnb", "binance coin",
-    "polygon", "matic",
+    "dogecoin",
+    "cardano",
+    "polygon",
     "avalanche", "avax",
-    "chainlink", "link",
-    "litecoin", "ltc",
-    "shiba", "shib",
-    "polkadot", "dot",
-    "tron", "trx",
+    "chainlink",
+    "litecoin",
+    "shiba inu", "shiba",
+    "polkadot",
+    "tron",
     "crypto", "altcoin", "stablecoin",
     "usdc", "usdt", "tether",
+    "coinbase", "binance",
 }
+
+# Precompiled word-boundary regex so substring false-positives can't leak through.
+import re as _re
+_CRYPTO_REGEX = r"\b(" + "|".join(_re.escape(k) for k in sorted(CRYPTO_KEYWORDS, key=len, reverse=True)) + r")\b"
 
 # === Arbitrage Settings ===
 # Net edge target: 1-3% of committed capital, after fees + spread + slippage.

@@ -267,9 +267,12 @@ def _hard_filter_market(market: dict) -> tuple[bool, str]:
     question = market.get("question", "") or ""
     q_lower = question.lower()
 
-    # 0) Crypto-only filter (runs first — cheapest)
+    # 0) Crypto-only filter (runs first — cheapest).
+    # Use word-boundary match so "sol" doesn't hit "solution", "dot" doesn't
+    # hit "spot", "link" doesn't hit "blinking", etc.
     if getattr(config, "CRYPTO_ONLY", False):
-        if not any(k in q_lower for k in config.CRYPTO_KEYWORDS):
+        import re
+        if not re.search(config._CRYPTO_REGEX, q_lower):
             return (False, "not crypto")
 
     # 1) Resolution-time filter for Up/Down markets
