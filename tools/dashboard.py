@@ -14,8 +14,27 @@ from flask import Flask, Response
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 DB_PATH = os.path.join(ROOT, "polybot.db")
+LOG_PATH = os.path.join(ROOT, "bot.log")
+LOG_TAIL_LINES = 80
 
 app = Flask(__name__)
+
+
+def tail_log(n: int = LOG_TAIL_LINES) -> str:
+    """Return the last n lines of bot.log, or a notice if missing."""
+    if not os.path.exists(LOG_PATH):
+        return "(bot.log not found — is the bot running?)"
+    try:
+        with open(LOG_PATH, "rb") as f:
+            try:
+                f.seek(-16384, os.SEEK_END)
+            except OSError:
+                f.seek(0)
+            data = f.read().decode("utf-8", errors="replace")
+        lines = data.splitlines()[-n:]
+        return "\n".join(lines) if lines else "(empty log)"
+    except Exception as e:
+        return f"(error reading log: {e})"
 
 
 def load_trades() -> list[dict]:
@@ -52,6 +71,12 @@ def color(val: float) -> str:
 def fmt(val: float) -> str:
     sign = "+" if val > 0 else ""
     return f"{sign}${val:.2f}"
+
+
+@app.route("/log")
+def log_raw():
+    """Raw log tail as plain text — polled by the dashboard."""
+    return Response(tail_log(), mimetype="text/plain")
 
 
 @app.route("/")
@@ -124,7 +149,6 @@ def index():
 <html>
 <head>
   <meta charset="utf-8">
-  <meta http-equiv="refresh" content="5">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Polybot Dashboard</title>
   <style>
@@ -141,6 +165,11 @@ def index():
     td {{ padding: 6px 8px; border-bottom: 1px solid #1a1a1a; font-size: 13px; word-break: break-word; }}
     .ts {{ color: #888; font-size: 11px; }}
     .refresh {{ color: #444; font-size: 11px; text-align: right; margin-top: 8px; }}
+    pre#log {{
+      background: #000; color: #9be89b; padding: 12px; border-radius: 6px;
+      max-height: 480px; overflow-y: auto; white-space: pre-wrap; word-break: break-word;
+      font-size: 12px; line-height: 1.4; border: 1px solid #222;
+    }}
   </style>
 </head>
 <body>
@@ -187,7 +216,29 @@ def index():
   </table>
 </div>
 
-<div class="refresh">Updated: {now} &nbsp;·&nbsp; Auto-refresh every 5s</div>
+<div class="card">
+  <h2>LIVE BOT LOG</h2>
+  <pre id="log">loading...</pre>
+</div>
+
+<div class="refresh">Updated: <span id="now">{now}</span> &nbsp;·&nbsp; Log refreshes every 2s, stats every 10s</div>
+
+<script>
+async function refreshLog() {{
+  try {{
+    const r = await fetch('/log');
+    const t = await r.text();
+    const el = document.getElementById('log');
+    const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
+    el.textContent = t;
+    if (atBottom) el.scrollTop = el.scrollHeight;
+    document.getElementById('now').textContent = new Date().toISOString().replace('T',' ').slice(0,19) + ' UTC';
+  }} catch (e) {{}}
+}}
+refreshLog();
+setInterval(refreshLog, 2000);
+setInterval(() => location.reload(), 10000);
+</script>
 </body>
 </html>"""
 
