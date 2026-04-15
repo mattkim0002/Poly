@@ -323,11 +323,9 @@ def _get_active_strategies() -> list[str]:
 def scan_resolution_snipes(markets: list[dict]) -> list[dict]:
     """Find near-certain outcomes priced below face value.
 
-    Looks for:
-    - Outcomes priced $0.90-$0.96 (market is ~sure but not $1.00 yet)
-    - OR outcomes priced $0.04-$0.10 on the OTHER side (same thing)
-
-    Profit = $1.00 - buy_price - fees.
+    Candidates priced between ENDGAME_PRICE_MIN and ENDGAME_PRICE_MAX.
+    Net edge computed after fees + slippage buffer + spread.
+    Final approval happens in the Claude endgame gate (execute_snipe).
     """
     snipes = []
 
@@ -342,15 +340,11 @@ def scan_resolution_snipes(markets: list[dict]) -> list[dict]:
         yes_price = outcome_prices[0]
         no_price = outcome_prices[1] if len(outcome_prices) > 1 else (1.0 - yes_price)
 
-        # Check each side for near-certain pricing
         for i, (token_id, price, outcome) in enumerate([
             (token_ids[0], yes_price, "Yes"),
             (token_ids[1], no_price, "No"),
         ]):
-            # We want to buy tokens priced 0.90-0.96
-            # Below 0.90 = market isn't sure enough
-            # Above 0.96 = not enough profit margin
-            if price < 0.90 or price > 0.96:
+            if price < config.ENDGAME_PRICE_MIN or price > config.ENDGAME_PRICE_MAX:
                 continue
 
             # Get REAL orderbook ask (what we can actually buy at)
@@ -361,10 +355,10 @@ def scan_resolution_snipes(markets: list[dict]) -> list[dict]:
             real_ask = book["asks"][0]["price"]
             ask_size = book["asks"][0]["size"]
 
-            if real_ask > 0.96 or real_ask < 0.90:
+            if real_ask < config.ENDGAME_PRICE_MIN or real_ask > config.ENDGAME_PRICE_MAX:
                 continue
 
-            # Calculate profit after fees
+            # Fee calc
             fee_free = is_fee_free_market(question)
             if fee_free:
                 fee_per_share = 0.0
@@ -372,12 +366,13 @@ def scan_resolution_snipes(markets: list[dict]) -> list[dict]:
                 fee_rate = get_fee_rate(token_id)
                 fee_per_share = fee_rate * real_ask * (1.0 - real_ask)
 
-            profit_per_share = 1.0 - real_ask - fee_per_share
+            # Net profit = payout - ask - fees - slippage buffer
+            slip = config.ENDGAME_SLIPPAGE_BUFFER
+            profit_per_share = 1.0 - real_ask - fee_per_share - slip
+            net_edge_pct = profit_per_share / real_ask if real_ask > 0 else 0.0
 
-            if profit_per_share < 0.02:  # Need at least 2% profit
+            if net_edge_pct < config.ENDGAME_MIN_NET_EDGE:
                 continue
-
-            profit_pct = profit_per_share / real_ask
 
             snipes.append({
                 "question": question,
@@ -387,19 +382,131 @@ def scan_resolution_snipes(markets: list[dict]) -> list[dict]:
                 "ask_price": real_ask,
                 "ask_size": ask_size,
                 "profit_per_share": profit_per_share,
-                "profit_pct": profit_pct,
+                "profit_pct": net_edge_pct,
                 "fee_per_share": fee_per_share,
+                "slippage_buffer": slip,
                 "fee_free": fee_free,
+                "end_date": market.get("end_date") or market.get("endDate") or "",
             })
 
     snipes.sort(key=lambda x: x["profit_pct"], reverse=True)
     return snipes
 
 
+ENDGAME_GATE_SYSTEM = """You are the strategy brain for a Polymarket bot.
+Only two strategies are allowed: intra-market ARBITRAGE and ENDGAME / near-resolution.
+This request is ENDGAME — a near-certain outcome priced 0.93-0.99 close to resolution.
+
+Approve ONLY if ALL of:
+1. The resolution criteria is clear, unambiguous, and has a known source.
+2. External data (headlines, official announcements, on-chain facts) makes the outcome
+   overwhelmingly likely — not merely "market seems sure".
+3. Net edge after fees + spread + slippage is between 1% and 3% of capital committed.
+4. No meaningful path risk, no "N/A / 50-50" resolution risk, no disputed outcome.
+5. Not a lottery ticket, not a momentum/directional bet.
+
+Reject if resolution is unclear, delayed, disputed, or evidence is weak.
+
+Reply with ONLY this JSON (no prose):
+{
+  "decision": "approve" | "reject",
+  "strategy": "endgame",
+  "gross_edge_pct": 0.00,
+  "net_edge_pct": 0.00,
+  "fees_deducted_pct": 0.00,
+  "reason": "1-3 sentence explanation",
+  "suggested_changes": {"price_adjustment": "", "size_adjustment": ""}
+}"""
+
+
+def _endgame_claude_gate(snipe: dict) -> dict | None:
+    """Send endgame candidate to Claude Sonnet for structured approval.
+
+    Returns the parsed JSON dict, or None on any failure.
+    The caller MUST only proceed if result["decision"] == "approve".
+    """
+    try:
+        import json as _json
+        import anthropic
+        client = anthropic.Anthropic()
+
+        # Best-effort: fetch recent headlines to help Claude verify.
+        try:
+            headlines = news.fetch_headlines(snipe["question"][:80], max_results=4) or []
+        except Exception:
+            headlines = []
+
+        hours_to_resolution = None
+        if snipe.get("end_date"):
+            try:
+                from datetime import datetime, timezone
+                end_dt = datetime.fromisoformat(str(snipe["end_date"]).replace("Z", "+00:00"))
+                hours_to_resolution = round(
+                    (end_dt - datetime.now(timezone.utc)).total_seconds() / 3600.0, 2
+                )
+            except (ValueError, TypeError):
+                pass
+
+        gross = 1.0 - snipe["ask_price"]
+        fees = snipe.get("fee_per_share", 0.0) + snipe.get("slippage_buffer", 0.0)
+        payload = _json.dumps({
+            "market_question": snipe["question"][:160],
+            "outcome_buying": snipe["outcome"],
+            "ask_price": round(snipe["ask_price"], 4),
+            "gross_edge_pct": round(gross / snipe["ask_price"], 4),
+            "net_edge_pct": round(snipe["profit_pct"], 4),
+            "fees_deducted_pct": round(fees / snipe["ask_price"], 4),
+            "hours_to_resolution": hours_to_resolution,
+            "recent_headlines": headlines[:4],
+        })
+
+        resp = client.messages.create(
+            model=config.CLAUDE_MODEL,
+            max_tokens=250,
+            system=ENDGAME_GATE_SYSTEM,
+            messages=[{"role": "user", "content": payload}],
+        )
+        text = resp.content[0].text.strip()
+        print(f"  [ENDGAME GATE] {text[:140]}")
+
+        try:
+            return _json.loads(text)
+        except _json.JSONDecodeError:
+            print(f"  [ENDGAME GATE] Invalid JSON — rejecting")
+            return None
+    except Exception as e:
+        print(f"  [ENDGAME GATE] Failed ({e}) — rejecting")
+        return None
+
+
 def execute_snipe(snipe: dict, bankroll: float) -> bool:
-    """Buy a near-certain outcome at a discount."""
-    max_spend = min(bankroll * 0.30, bankroll - 2.0)  # Keep $2 reserve
+    """Execute an endgame trade — Claude gate + tight size cap.
+
+    Gate rules (all must pass):
+      - Claude returns decision == "approve"
+      - net_edge_pct from Claude >= ENDGAME_MIN_NET_EDGE
+      - Absolute profit >= ENDGAME_MIN_PROFIT_USD
+      - Position size <= ENDGAME_MAX_POSITION_PCT of bankroll
+    """
+    # Step 1: Claude endgame gate (blocking)
+    gate = _endgame_claude_gate(snipe)
+    if not gate:
+        return False
+
+    decision = gate.get("decision", "reject")
+    if decision != "approve":
+        print(f"  [ENDGAME] REJECT: {gate.get('reason', 'no reason')[:120]}")
+        return False
+
+    claude_net = float(gate.get("net_edge_pct") or 0.0)
+    if claude_net < config.ENDGAME_MIN_NET_EDGE:
+        print(f"  [ENDGAME] REJECT: Claude net_edge {claude_net:.2%} < {config.ENDGAME_MIN_NET_EDGE:.0%}")
+        return False
+
+    # Step 2: Sizing — cap at ENDGAME_MAX_POSITION_PCT
+    max_spend = min(bankroll * config.ENDGAME_MAX_POSITION_PCT, bankroll - 2.0)
     if max_spend < config.MIN_ORDER_SIZE_USD:
+        print(f"  [ENDGAME] REJECT: max_spend ${max_spend:.2f} too small")
         return False
 
     price = snipe["ask_price"]
@@ -411,15 +518,21 @@ def execute_snipe(snipe: dict, bankroll: float) -> bool:
     cost = shares * price
     expected_profit = shares * snipe["profit_per_share"]
 
-    print(f"\n  === RESOLUTION SNIPE ===")
+    # Step 3: Absolute profit floor
+    if expected_profit < config.ENDGAME_MIN_PROFIT_USD:
+        print(f"  [ENDGAME] REJECT: profit ${expected_profit:.3f} < min ${config.ENDGAME_MIN_PROFIT_USD}")
+        return False
+
+    print(f"\n  === ENDGAME TRADE (Claude approved) ===")
     print(f"  Market:  {snipe['question'][:60]}")
     print(f"  Side:    {snipe['outcome']} @ ${price:.3f}")
     print(f"  Shares:  {shares}")
     print(f"  Cost:    ${cost:.2f}")
     print(f"  Profit:  ${expected_profit:.2f} ({snipe['profit_pct']:.1%})")
+    print(f"  Claude:  net={claude_net:.2%} | {gate.get('reason', '')[:80]}")
     fee_str = "FREE" if snipe['fee_free'] else f"${snipe['fee_per_share']:.4f}/share"
     print(f"  Fees:    {fee_str}")
-    print(f"  =========================")
+    print(f"  ========================================")
 
     order_id = trader.place_limit_order(
         token_id=snipe["token_id"],
@@ -436,7 +549,7 @@ def execute_snipe(snipe: dict, bankroll: float) -> bool:
 
     database.record_trade(
         market_id=snipe["market_id"],
-        market_question=f"[SNIPE] {snipe['question'][:80]}",
+        market_question=f"[ENDGAME] {snipe['question'][:80]}",
         token_id=snipe["token_id"],
         side="BUY",
         outcome=snipe["outcome"],

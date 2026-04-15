@@ -47,12 +47,13 @@ CYCLE_INTERVAL_SEC = 15            # Fast scanning for momentum
 MAX_MARKETS_PER_CYCLE = 50
 
 # === Strategy Toggles ===
-ENABLE_ARB = True                  # Strategy 1: crypto arb (Yes+No < $1.00)
-ENABLE_MOMENTUM_CLAUDE = True      # Strategy 2: momentum with Claude Sonnet gate
-ENABLE_SNIPE = False               # DISABLED — buys at fair-value, structurally -EV after fees
-ENABLE_BINANCE_LAG = True          # Strategy 4: Binance-lag directional (Claude Sonnet veto)
-ENABLE_THRESHOLD = False           # DISABLED — mean-reversion loses on crypto trends
-ENABLE_MOMENTUM_INTRADAY = False   # DISABLED — experimental hourly/15-min markets
+# NEW STRATEGY (Apr 15 rewrite): only ARB + ENDGAME. Everything else OFF.
+ENABLE_ARB = True                  # Strategy 1: intra-market arb (Yes+No < $1.00)
+ENABLE_SNIPE = True                # Strategy 2: endgame / near-resolution (with Claude gate)
+ENABLE_MOMENTUM_CLAUDE = False     # OFF — directional momentum bleeds
+ENABLE_BINANCE_LAG = False         # OFF — Binance-lag directional bleeds
+ENABLE_THRESHOLD = False           # OFF — mean-reversion loses on crypto trends
+ENABLE_MOMENTUM_INTRADAY = False   # OFF — experimental hourly/15-min markets
 
 # === Market Timeframe Filter ===
 # Only allow original 5-minute Up/Down markets from April 4 strategy
@@ -77,7 +78,10 @@ MIN_RESOLUTION_HOURS = 1.0
 
 # Crypto-only mode: if True, skip any market whose question doesn't contain
 # a crypto keyword. Keeps the bot focused on what it understands.
-CRYPTO_ONLY = True
+# Set to False when running endgame strategy — endgame works best on
+# clearly-resolving non-crypto markets (sports finals, elections after
+# call, official announcements, etc.).
+CRYPTO_ONLY = False
 CRYPTO_KEYWORDS = {
     "bitcoin", "btc",
     "ethereum", "eth",
@@ -98,8 +102,21 @@ CRYPTO_KEYWORDS = {
 }
 
 # === Arbitrage Settings ===
-MIN_ARB_PROFIT = 0.005
-ARB_MAX_POSITION_PCT = 0.40
+# Net edge target: 1-3% of committed capital, after fees + spread + slippage.
+# Reject if net < 1% or liquidity is too thin.
+MIN_ARB_PROFIT = 0.01              # 1% minimum net edge (tightened from 0.005)
+ARB_MAX_POSITION_PCT = 0.15        # 15% of bankroll per arb (~$5 at $35 bankroll)
+ARB_SLIPPAGE_BUFFER = 0.003        # 0.3c per share slippage cushion
+
+# === Endgame / Resolution Sniper Settings ===
+# Near-resolution contracts priced 0.95-0.99 with Claude validation of the
+# resolution criteria + external data. Same net-edge target as arb (1-3%).
+ENDGAME_PRICE_MIN = 0.93           # Buy floor
+ENDGAME_PRICE_MAX = 0.99           # Buy ceiling
+ENDGAME_MIN_NET_EDGE = 0.01        # 1% minimum net edge after all costs
+ENDGAME_SLIPPAGE_BUFFER = 0.003    # 0.3c per share
+ENDGAME_MAX_POSITION_PCT = 0.15    # 15% of bankroll per endgame trade
+ENDGAME_MIN_PROFIT_USD = 0.02      # Minimum $0.02 absolute profit per trade
 
 # === Sports Filter ===
 SPORTS_KEYWORDS = {
@@ -170,13 +187,12 @@ MIN_EDGE_CRYPTO = 0.03             # 3% for crypto — Claude + news gate confir
 MIN_EV_PER_DOLLAR = 0.01           # $0.01 EV per dollar risked
 
 # === Position Sizing ===
-# Math: $5 min bet / $35 bankroll = 14.3% per trade forced.
-# Kelly says ~20% for a 60/40 edge at even odds.
-# So $5 bets are actually near-optimal Kelly for moderate edges.
-KELLY_FRACTION = 0.40              # 40% Kelly — but floor is $5 anyway
-MAX_POSITION_PCT = 0.20            # Cap at $7 per trade (20% of $35)
-MAX_OPEN_POSITIONS = 2             # Reduced — keep buffer cash for sell orders
-MIN_ORDER_SIZE_USD = 1.0           # Will get bumped to $5 by Polymarket minimum
+# Conservative: max 15% per trade = ~$5 at $35 bankroll.
+# Polymarket min order size = 5 shares, so actual cost is 5 × price.
+KELLY_FRACTION = 0.40              # 40% Kelly — but floor is ~$5 anyway
+MAX_POSITION_PCT = 0.15            # 15% max per trade (~$5 at $35)
+MAX_OPEN_POSITIONS = 2             # Keep buffer cash for sell orders
+MIN_ORDER_SIZE_USD = 1.0           # Platform min is 5 shares regardless
 
 # === Risk Management ===
 DD_THRESHOLD_HALF = 0.20           # Halve at 20% drawdown ($7 loss)
