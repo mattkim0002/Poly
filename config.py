@@ -77,11 +77,8 @@ MIN_PRICE_FLOOR = 0.15
 MIN_RESOLUTION_HOURS = 1.0
 
 # Crypto-only mode: if True, skip any market whose question doesn't contain
-# a crypto keyword. Keeps the bot focused on what it understands.
-# Set to False when running endgame strategy — endgame works best on
-# clearly-resolving non-crypto markets (sports finals, elections after
-# call, official announcements, etc.).
-CRYPTO_ONLY = False
+# a crypto keyword. Keeps arb + endgame focused on crypto markets only.
+CRYPTO_ONLY = True
 CRYPTO_KEYWORDS = {
     "bitcoin", "btc",
     "ethereum", "eth",
