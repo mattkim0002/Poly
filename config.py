@@ -47,11 +47,11 @@ CYCLE_INTERVAL_SEC = 15            # Fast scanning for momentum
 MAX_MARKETS_PER_CYCLE = 50
 
 # === Strategy Toggles ===
-# NEW STRATEGY (Apr 15 rewrite): only ARB + ENDGAME. Everything else OFF.
+# Crypto bot mode: ARB + ENDGAME + MOMENTUM + BINANCE-LAG, crypto-only.
 ENABLE_ARB = True                  # Strategy 1: intra-market arb (Yes+No < $1.00)
 ENABLE_SNIPE = True                # Strategy 2: endgame / near-resolution (with Claude gate)
-ENABLE_MOMENTUM_CLAUDE = False     # OFF — directional momentum bleeds
-ENABLE_BINANCE_LAG = False         # OFF — Binance-lag directional bleeds
+ENABLE_MOMENTUM_CLAUDE = True      # Strategy 3: momentum + Claude Sonnet gate
+ENABLE_BINANCE_LAG = True          # Strategy 4: Binance-lag directional (Claude Sonnet veto)
 ENABLE_THRESHOLD = False           # OFF — mean-reversion loses on crypto trends
 ENABLE_MOMENTUM_INTRADAY = False   # OFF — experimental hourly/15-min markets
 
@@ -71,16 +71,15 @@ MIN_RESOLUTION_MINUTES = 1.5       # Matches candle filter (entry_window + mid_c
 MIN_PRICE_FLOOR = 0.15
 
 # Anti-coinflip: skip any "Up or Down" market resolving sooner than this.
-# 5-min and 15-min binaries are coin flips with adverse fill bias.
-# 1h minimum lets hourly markets through while still blocking the worst
-# short-duration noise. Set to 0 to allow 5-min markets again.
-MIN_RESOLUTION_HOURS = 1.0
+# 0 = allow 5-min markets (required for Binance-Lag + Momentum strategies).
+# Protection now comes from: orderbook flow gate, price floor, Claude gates,
+# and Binance trend confirmation — not from blocking short-duration markets.
+MIN_RESOLUTION_HOURS = 0.0
 
-# Crypto-only mode: if True, skip any market whose question doesn't contain
-# a crypto keyword. OFF because ARB + ENDGAME strategies don't work on
-# crypto Up/Down binaries — they need markets with clear resolution and
-# tight spreads (sports finals, political calls, geopolitics, weather).
-CRYPTO_ONLY = False
+# Crypto-only mode: skip any market whose question doesn't contain a
+# crypto keyword. ON for crypto bot mode (Momentum + Binance-Lag are
+# designed for BTC/ETH/SOL Up/Down binaries).
+CRYPTO_ONLY = True
 
 # Tight crypto keyword set — only unambiguous terms.
 # Short/generic tokens like "sol", "dot", "link", "eth", "ada" would
