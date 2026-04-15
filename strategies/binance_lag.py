@@ -25,8 +25,8 @@ SUPPORTED_COINS = {
 }
 
 # Minimum move over 10-15 min to consider a trade
-MIN_MOVE_PCT = 0.08      # 0.08% move required (very loose — take more trades)
-MIN_VOL_RATIO = 0.8      # Volume ratio floor — loosened from 1.0 for low-vol regimes
+MIN_MOVE_PCT = 0.05      # 0.05% move required (loosened from 0.08 — more trades in quiet regimes)
+MIN_VOL_RATIO = 0.6      # Volume ratio floor — loosened from 0.8 for low-vol regimes
 # Polymarket must be cheap relative to our estimate
 MAX_POLY_PRICE = 0.78    # Only buy if Poly price < 78c
 MIN_TRUE_PROB = 0.55     # Our estimate must be >= 55%
