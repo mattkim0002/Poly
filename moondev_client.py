@@ -1,21 +1,15 @@
-"""Moondev API client — thin wrapper around the Moondev data + AI endpoints.
+"""Moondev client — local shim.
 
-Auth:
-  - Data endpoints use `X-API-Key: <MOONDEV_API_KEY>` header.
-  - AI endpoint uses `Authorization: Bearer <MOONDEV_API_KEY>` header.
-
-The key is read from the `MOONDEV_API_KEY` environment variable. No secrets
-live in the repo.
+Moondev's actual API surface wasn't reachable with the key we have, so this
+file implements the same public functions using data we already pull from
+Binance (prices + orderbook) and Anthropic (AI). Same signatures as the
+earlier HTTP client — callers don't need to change.
 
 Public surface:
   - get_prices()
   - get_price(symbol)
   - get_orderbook(symbol)
   - call_moondev_ai(messages, max_tokens=400)
-
-Errors:
-  - MoondevConfigError: API key missing.
-  - MoondevAPIError: HTTP error or malformed response.
 """
 
 import os
@@ -24,91 +18,124 @@ from typing import Any
 import httpx
 
 
-DATA_BASE_URL = os.getenv("MOONDEV_BASE_URL", "https://api.moondev.com")
-AI_URL = f"{DATA_BASE_URL}/api/ai/v1/chat/completions"
-DEFAULT_TIMEOUT = 8.0
+BINANCE_BASE = "https://api.binance.com"
+DEFAULT_TIMEOUT = 5.0
 
 
 class MoondevConfigError(RuntimeError):
-    """Raised when the Moondev API key is missing."""
+    """Raised when a required key is missing (e.g. Anthropic for AI)."""
 
 
 class MoondevAPIError(RuntimeError):
-    """Raised when a Moondev API call fails."""
+    """Raised when an upstream call fails."""
 
 
-def _api_key() -> str:
-    key = os.getenv("MOONDEV_API_KEY", "").strip()
-    if not key:
-        raise MoondevConfigError(
-            "MOONDEV_API_KEY not set — add it to your .env or shell environment"
+def _binance_symbol(symbol: str) -> str:
+    """Normalize: 'btc', 'BTC', 'BTCUSDT' → 'BTCUSDT'."""
+    s = symbol.strip().upper()
+    return s if s.endswith("USDT") else f"{s}USDT"
+
+
+def get_prices() -> list[dict]:
+    """Return live prices for a basket of tracked coins from Binance."""
+    coins = ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "ADA", "LINK"]
+    out = []
+    try:
+        resp = httpx.get(f"{BINANCE_BASE}/api/v3/ticker/price", timeout=DEFAULT_TIMEOUT)
+        resp.raise_for_status()
+        by_sym = {row["symbol"]: float(row["price"]) for row in resp.json()}
+    except httpx.HTTPError as e:
+        raise MoondevAPIError(f"binance prices failed: {e}") from e
+
+    for c in coins:
+        sym = _binance_symbol(c)
+        if sym in by_sym:
+            out.append({"symbol": c, "price": by_sym[sym]})
+    return out
+
+
+def get_price(symbol: str) -> dict:
+    """Single-symbol price from Binance."""
+    if not symbol:
+        raise ValueError("symbol required")
+    sym = _binance_symbol(symbol)
+    try:
+        resp = httpx.get(
+            f"{BINANCE_BASE}/api/v3/ticker/price",
+            params={"symbol": sym}, timeout=DEFAULT_TIMEOUT,
         )
-    return key
+        resp.raise_for_status()
+        data = resp.json()
+    except httpx.HTTPError as e:
+        raise MoondevAPIError(f"binance price failed: {e}") from e
+    return {"symbol": symbol.upper(), "price": float(data["price"])}
 
 
-def _data_headers() -> dict[str, str]:
-    return {"X-API-Key": _api_key(), "Accept": "application/json"}
+def get_orderbook(symbol: str, depth: int = 20) -> dict:
+    """Binance orderbook for a symbol."""
+    if not symbol:
+        raise ValueError("symbol required")
+    sym = _binance_symbol(symbol)
+    try:
+        resp = httpx.get(
+            f"{BINANCE_BASE}/api/v3/depth",
+            params={"symbol": sym, "limit": depth}, timeout=DEFAULT_TIMEOUT,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except httpx.HTTPError as e:
+        raise MoondevAPIError(f"binance depth failed: {e}") from e
 
-
-def _ai_headers() -> dict[str, str]:
+    bids = [[float(p), float(q)] for p, q in data.get("bids", [])]
+    asks = [[float(p), float(q)] for p, q in data.get("asks", [])]
+    bid_volume = sum(q for _, q in bids)
+    ask_volume = sum(q for _, q in asks)
     return {
-        "Authorization": f"Bearer {_api_key()}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
+        "symbol": symbol.upper(),
+        "bids": bids[:10],
+        "asks": asks[:10],
+        "bid_volume": bid_volume,
+        "ask_volume": ask_volume,
     }
 
 
-def _get(path: str, params: dict | None = None) -> Any:
-    url = f"{DATA_BASE_URL}{path}"
-    try:
-        resp = httpx.get(url, headers=_data_headers(), params=params, timeout=DEFAULT_TIMEOUT)
-    except httpx.HTTPError as e:
-        raise MoondevAPIError(f"network error calling {path}: {e}") from e
-    if resp.status_code != 200:
-        raise MoondevAPIError(f"{path} returned HTTP {resp.status_code}: {resp.text[:200]}")
-    try:
-        return resp.json()
-    except ValueError as e:
-        raise MoondevAPIError(f"{path} returned non-JSON: {resp.text[:200]}") from e
-
-
-def get_prices() -> Any:
-    """Return the full price list from Moondev."""
-    return _get("/api/data/prices")
-
-
-def get_price(symbol: str) -> Any:
-    """Return the current price for a single symbol."""
-    if not symbol:
-        raise ValueError("symbol required")
-    return _get(f"/api/data/prices/{symbol.upper()}")
-
-
-def get_orderbook(symbol: str) -> Any:
-    """Return the orderbook for a single symbol."""
-    if not symbol:
-        raise ValueError("symbol required")
-    return _get(f"/api/data/orderbook/{symbol.upper()}")
-
-
 def call_moondev_ai(messages: list[dict], max_tokens: int = 400) -> Any:
-    """Call the Moondev AI chat completions endpoint.
+    """Route 'AI' calls to Anthropic Claude.
 
-    Raises MoondevConfigError if the key is missing, MoondevAPIError on
-    HTTP failures. Callers should catch MoondevAPIError if AI access may
-    not be enabled on their account.
+    Returns a dict shaped like OpenAI-style chat completions so callers can
+    read `resp["choices"][0]["message"]["content"]`.
     """
     if not messages:
         raise ValueError("messages list cannot be empty")
+    if not os.getenv("ANTHROPIC_API_KEY", "").strip():
+        raise MoondevConfigError("ANTHROPIC_API_KEY not set")
 
-    body = {"messages": messages, "max_tokens": max_tokens}
     try:
-        resp = httpx.post(AI_URL, headers=_ai_headers(), json=body, timeout=DEFAULT_TIMEOUT)
-    except httpx.HTTPError as e:
-        raise MoondevAPIError(f"network error calling AI: {e}") from e
-    if resp.status_code != 200:
-        raise MoondevAPIError(f"AI returned HTTP {resp.status_code}: {resp.text[:200]}")
+        import anthropic
+        import config as _cfg
+    except ImportError as e:
+        raise MoondevAPIError(f"anthropic SDK missing: {e}") from e
+
+    # Pull out an optional system message if the caller supplied one
+    system = ""
+    convo: list[dict] = []
+    for m in messages:
+        role = m.get("role", "user")
+        if role == "system":
+            system = m.get("content", "")
+        else:
+            convo.append({"role": role, "content": m.get("content", "")})
+
     try:
-        return resp.json()
-    except ValueError as e:
-        raise MoondevAPIError(f"AI returned non-JSON: {resp.text[:200]}") from e
+        client = anthropic.Anthropic()
+        resp = client.messages.create(
+            model=getattr(_cfg, "CLAUDE_MODEL", "claude-sonnet-4-6"),
+            max_tokens=max_tokens,
+            system=system or "You are a crypto trading assistant.",
+            messages=convo or [{"role": "user", "content": ""}],
+        )
+        text = resp.content[0].text if resp.content else ""
+    except Exception as e:
+        raise MoondevAPIError(f"anthropic call failed: {e}") from e
+
+    return {"choices": [{"message": {"role": "assistant", "content": text}}]}
