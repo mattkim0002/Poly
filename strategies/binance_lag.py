@@ -310,7 +310,7 @@ def claude_gate(candidate: dict) -> dict | None:
         payload = json.dumps(payload_dict)
 
         resp = client.messages.create(
-            model="claude-opus-4-7",
+            model="claude-sonnet-4-6",
             max_tokens=150,
             system=CLAUDE_GATE_SYSTEM,
             messages=[{"role": "user", "content": payload}],

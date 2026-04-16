@@ -261,7 +261,7 @@ LONGSHOT_CORRECTION = 0.0          # Disabled for crypto
 # === Claude AI ===
 # Claude is the GATE — every trade must be approved.
 # Using Sonnet for speed + intelligence.
-CLAUDE_MODEL = "claude-opus-4-7"
+CLAUDE_MODEL = "claude-sonnet-4-6"
 MAX_CLAUDE_CALLS = 20
 CLAUDE_MAX_TOKENS = 300
 

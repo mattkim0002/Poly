@@ -804,7 +804,7 @@ def _claude_news_check(question: str, direction: str, edge: float,
         })
 
         response = client.messages.create(
-            model="claude-opus-4-7",
+            model="claude-sonnet-4-6",
             max_tokens=120,
             system=NEWS_GATE_SYSTEM,
             messages=[{"role": "user", "content": payload}],
