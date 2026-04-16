@@ -54,7 +54,7 @@ def get_regime(symbol: str = "BTCUSDT") -> str:
     """
     try:
         resp = httpx.get(
-            "https://api.binance.com/api/v3/klines",
+            "https://data-api.binance.vision/api/v3/klines",
             params={"symbol": symbol, "interval": "5m", "limit": 10},
             timeout=10,
         )
@@ -292,7 +292,7 @@ def _fetch_candles(symbol: str, interval: str, limit: int) -> list[dict] | None:
     """Fetch OHLCV candles from Binance."""
     try:
         resp = httpx.get(
-            "https://api.binance.com/api/v3/klines",
+            "https://data-api.binance.vision/api/v3/klines",
             params={"symbol": symbol, "interval": interval, "limit": limit},
             timeout=10,
         )
@@ -395,7 +395,7 @@ def get_orderbook_imbalance(symbol: str) -> dict | None:
     """
     try:
         resp = httpx.get(
-            "https://api.binance.com/api/v3/depth",
+            "https://data-api.binance.vision/api/v3/depth",
             params={"symbol": symbol, "limit": 20},
             timeout=5,
         )
@@ -437,7 +437,7 @@ def get_large_trades(symbol: str) -> dict | None:
     """
     try:
         resp = httpx.get(
-            "https://api.binance.com/api/v3/aggTrades",
+            "https://data-api.binance.vision/api/v3/aggTrades",
             params={"symbol": symbol, "limit": 200},
             timeout=5,
         )
@@ -619,7 +619,7 @@ def get_higher_timeframe_trend(symbol: str) -> dict:
     try:
         # Fetch 4h candles (last 6 = 24 hours)
         resp_4h = httpx.get(
-            "https://api.binance.com/api/v3/klines",
+            "https://data-api.binance.vision/api/v3/klines",
             params={"symbol": symbol, "interval": "4h", "limit": 6},
             timeout=10,
         )
@@ -628,7 +628,7 @@ def get_higher_timeframe_trend(symbol: str) -> dict:
 
         # Fetch 1h candles (last 12 = 12 hours)
         resp_1h = httpx.get(
-            "https://api.binance.com/api/v3/klines",
+            "https://data-api.binance.vision/api/v3/klines",
             params={"symbol": symbol, "interval": "1h", "limit": 12},
             timeout=10,
         )

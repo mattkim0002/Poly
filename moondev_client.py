@@ -18,7 +18,7 @@ from typing import Any
 import httpx
 
 
-BINANCE_BASE = "https://api.binance.com"
+BINANCE_BASE = "https://data-api.binance.vision"
 DEFAULT_TIMEOUT = 5.0
 
 
