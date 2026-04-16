@@ -709,36 +709,28 @@ def _print_portfolio(bankroll: float, open_trades: list[dict], recent_trades: li
     print()
 
 
-NEWS_GATE_SYSTEM = """You are a risk filter for a Polymarket 5-minute crypto Up/Down trading bot.
+NEWS_GATE_SYSTEM = """You are a trade filter for a Polymarket 5-minute crypto Up/Down trading bot.
 
-You receive raw data: coin, side (UP/DOWN), Polymarket price, Binance momentum (60s/180s price change,
-volume ratio, buy pressure, acceleration, 1h/4h trend), orderbook imbalance, recent_headlines (crypto news),
-and macro_bias (global crypto outlook from a separate 3h analysis).
+You receive raw data: coin, side (UP/DOWN), Polymarket price, Binance momentum,
+orderbook imbalance, recent_headlines, and macro_bias.
 
-Your ONLY job: decide if the bot should APPROVE or REJECT this specific trade.
+Your ONLY job: APPROVE or REJECT. Default is APPROVE. Only reject when clearly bad.
 
-Reply with ONLY this JSON, nothing else:
-
+Reply with ONLY this JSON:
 {"ok_to_trade": true or false, "reason": "single short sentence", "confidence": "low|medium|high"}
 
-Rules:
-1. If Binance 1h/4h trend is AGAINST the trade direction → ok_to_trade = false.
-2. If Binance 60s/180s momentum is AGAINST the trade direction → ok_to_trade = false.
-3. If volume ratio < 1.0 (no volume spike) → ok_to_trade = false.
-4. If buy pressure < 0.45 for UP trades or > 0.55 for DOWN trades → ok_to_trade = false.
-5. If a recent headline describes a clear opposing catalyst (hack, SEC action, exchange outage) → ok_to_trade = false.
-6. If macro_bias is bearish (high confidence) and side = UP, or bullish (high) and side = DOWN → ok_to_trade = false.
-7. If signals are mixed, weak, or unclear → ok_to_trade = false.
-8. ONLY ok_to_trade = true when ALL of:
-   - Binance short-term momentum supports the trade direction
-   - Binance 1h and 4h trends are not against it
-   - Volume spike confirms the move (ratio >= 1.5)
-   - Buy pressure aligns with direction
-   - No contradicting headline
-   - Macro bias is neutral or aligned
-   - Edge >= 5%
+REJECT only when:
+1. Binance 1h AND 4h trends BOTH clearly oppose the trade direction.
+2. A major headline describes a clear opposing catalyst (hack, SEC action, exchange outage).
+3. Macro_bias is bearish with HIGH confidence and side = UP (or vice versa).
 
-Be extremely conservative. When in doubt, REJECT.
+APPROVE when:
+- Binance short-term momentum supports the direction (even weakly).
+- Signals are mixed but not clearly opposing → APPROVE with low confidence.
+- Edge >= 3% with no clear opposition → APPROVE.
+- When in doubt → APPROVE with low confidence.
+
+The user wants the bot TRADING. Be permissive, not conservative.
 Never write anything outside the JSON."""
 
 
@@ -1130,8 +1122,8 @@ def run_cycle():
                 flow = trader.get_orderbook_flow(cand["token_id"])
                 print(f"  [FLOW] {cand['coin']} {cand['outcome']} "
                       f"buy_ratio={flow['buy_ratio']:.2f} ({flow['signal']})")
-                if flow["signal"] == "selling":
-                    print(f"  [FLOW] BLOCK {cand['coin']} {cand['outcome']}: sellers dominate orderbook")
+                if flow["buy_ratio"] < 0.15:
+                    print(f"  [FLOW] BLOCK {cand['coin']} {cand['outcome']}: extreme sell pressure ({flow['buy_ratio']:.2f})")
                     continue
 
                 # Market structure filter
@@ -1360,8 +1352,8 @@ def run_cycle():
                 if best_trade:
                     flow = trader.get_orderbook_flow(best_trade["token_id"])
                     print(f"  [FLOW] {best_trade['outcome']} buy_ratio={flow['buy_ratio']:.2f} ({flow['signal']})")
-                    if flow["signal"] == "selling":
-                        print(f"  [FLOW] BLOCK momentum: sellers dominate orderbook")
+                    if flow["buy_ratio"] < 0.15:
+                        print(f"  [FLOW] BLOCK momentum: extreme sell pressure ({flow['buy_ratio']:.2f})")
                         best_trade = None
 
                 if best_trade:
