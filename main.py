@@ -1131,10 +1131,11 @@ def run_cycle():
 
                 # Polymarket orderbook flow: are real buyers stacked on this token?
                 # Block if sellers clearly dominate the depth we're trying to buy into.
+                # Skip the flow gate when edge is Tier A — a big enough edge overrides flow.
                 flow = trader.get_orderbook_flow(cand["token_id"])
                 print(f"  [FLOW] {cand['coin']} {cand['outcome']} "
                       f"buy_ratio={flow['buy_ratio']:.2f} ({flow['signal']})")
-                if flow["buy_ratio"] < 0.15:
+                if flow["buy_ratio"] < 0.15 and cand["edge"] < config.TIER_A_EDGE:
                     print(f"  [FLOW] BLOCK {cand['coin']} {cand['outcome']}: extreme sell pressure ({flow['buy_ratio']:.2f})")
                     continue
 
@@ -1276,26 +1277,28 @@ def run_cycle():
                         # (Caught the Solana 3.2¢ Down trade that lost 142 shares.)
                         if yes_price < 0.25 or yes_price > 0.75:
                             print(f"  [GAP] SKIP {question[:40]}: price {yes_price:.2f} outside 0.25-0.75 band (market already decided)")
-                        elif gap >= 0.20:
-                            # Binance says UP but Polymarket still cheap — BUY YES
+                        elif gap >= config.MIN_EDGE_CRYPTO:
+                            # Binance says UP but Polymarket still cheap — BUY YES.
+                            # Confidence scales with gap size (Tier A >=3% = high, else medium).
+                            conf_label = "high" if gap >= config.TIER_A_EDGE else "medium"
                             best_edge = gap
                             best_trade = {
                                 "market_id": market["id"], "question": question,
                                 "token_id": yes_token, "outcome": "Yes",
                                 "price": yes_price, "probability": binance_prob,
-                                "edge": gap, "signal": {"confidence": "high", "combo": "gap", "kelly_mult": 1.0,
+                                "edge": gap, "signal": {"confidence": conf_label, "combo": "gap", "kelly_mult": 1.0,
                                                          "reasoning": f"Gap={gap:.0%} Binance={binance_prob:.0%}"},
                                 "end_date": market.get("end_date", ""),
                             }
-                            continue  # Skip normal momentum for this market
-                        elif gap <= -0.20:
-                            # Binance says DOWN but Polymarket overpriced UP — BUY NO
+                            continue
+                        elif gap <= -config.MIN_EDGE_CRYPTO:
+                            conf_label = "high" if abs(gap) >= config.TIER_A_EDGE else "medium"
                             best_edge = abs(gap)
                             best_trade = {
                                 "market_id": market["id"], "question": question,
                                 "token_id": no_token, "outcome": "No",
                                 "price": no_price, "probability": 1.0 - binance_prob,
-                                "edge": abs(gap), "signal": {"confidence": "high", "combo": "gap", "kelly_mult": 1.0,
+                                "edge": abs(gap), "signal": {"confidence": conf_label, "combo": "gap", "kelly_mult": 1.0,
                                                               "reasoning": f"Gap={gap:.0%} Binance={binance_prob:.0%}"},
                                 "end_date": market.get("end_date", ""),
                             }
@@ -1364,7 +1367,7 @@ def run_cycle():
                 if best_trade:
                     flow = trader.get_orderbook_flow(best_trade["token_id"])
                     print(f"  [FLOW] {best_trade['outcome']} buy_ratio={flow['buy_ratio']:.2f} ({flow['signal']})")
-                    if flow["buy_ratio"] < 0.15:
+                    if flow["buy_ratio"] < 0.15 and best_trade["edge"] < config.TIER_A_EDGE:
                         print(f"  [FLOW] BLOCK momentum: extreme sell pressure ({flow['buy_ratio']:.2f})")
                         best_trade = None
 
