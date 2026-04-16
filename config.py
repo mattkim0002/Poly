@@ -31,6 +31,7 @@ load_dotenv()
 POLYMARKET_PRIVATE_KEY = os.getenv("POLYMARKET_PRIVATE_KEY", "")
 POLYMARKET_FUNDER_ADDRESS = os.getenv("POLYMARKET_FUNDER_ADDRESS", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+MOONDEV_API_KEY = os.getenv("MOONDEV_API_KEY", "")
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 
 # === Paper Trading ===

@@ -16,7 +16,7 @@ sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
 import config
-from core import database, market_data, trader, crypto_predictor, news, macro
+from core import database, market_data, trader, crypto_predictor, news, macro, moondev
 from core.market_filter import check_trade as market_filter_check
 from strategies.risk import calculate_r_multiple, expectancy, drawdown_multiplier, drawdown
 from strategies.arbitrage import scan_all_markets, execute_arb
@@ -452,6 +452,10 @@ def _endgame_claude_gate(snipe: dict) -> dict | None:
 
         gross = 1.0 - snipe["ask_price"]
         fees = snipe.get("fee_per_share", 0.0) + snipe.get("slippage_buffer", 0.0)
+        smart_money = moondev.get_profitable_wallet_signal(
+            snipe.get("market_id") or snipe.get("question", "")[:40]
+        )
+
         payload = _json.dumps({
             "market_question": snipe["question"][:160],
             "outcome_buying": snipe["outcome"],
@@ -461,6 +465,7 @@ def _endgame_claude_gate(snipe: dict) -> dict | None:
             "fees_deducted_pct": round(fees / snipe["ask_price"], 4),
             "hours_to_resolution": hours_to_resolution,
             "recent_headlines": headlines[:4],
+            "smart_money": smart_money,
         })
 
         resp = client.messages.create(
@@ -791,6 +796,8 @@ def _claude_news_check(question: str, direction: str, edge: float,
         except Exception:
             btc_confirm = {"agrees": True, "btc_move_180s_pct": 0.0, "strength": "none"}
 
+        smart_money = moondev.get_profitable_wallet_signal(question[:40])
+
         payload = _json.dumps({
             "coin": symbol or "BTC",
             "side": direction,
@@ -801,6 +808,7 @@ def _claude_news_check(question: str, direction: str, edge: float,
             "recent_headlines": recent_headlines,
             "macro_bias": macro_payload,
             "btc_confirmation": btc_confirm,
+            "smart_money": smart_money,
         })
 
         response = client.messages.create(
