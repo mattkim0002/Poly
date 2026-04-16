@@ -191,9 +191,11 @@ BLACKLIST_KEYWORDS = ["win the", "election", "president", "minister", "vote", "p
 # Math: with $35 bankroll and $5 min bet, each trade is ~14% of bankroll.
 # Need high confidence to justify that concentration.
 # Claude gate + 5% edge = only trade when we're 55%+ sure on a 50/50 market.
-MIN_EDGE = 0.03                    # 3% edge minimum (loosened to take more trades)
-MIN_EDGE_CRYPTO = 0.03             # 3% for crypto — Claude + news gate confirms
+MIN_EDGE = 0.01                    # 1% edge minimum — Tier B floor
+MIN_EDGE_CRYPTO = 0.01             # 1% for crypto — Tier B floor
 MIN_EV_PER_DOLLAR = 0.01           # $0.01 EV per dollar risked
+TIER_A_EDGE = 0.03                 # >= 3% = Tier A (full size)
+                                   # 1-3%  = Tier B (half size)
 
 # === Position Sizing ===
 # Conservative: max 15% per trade = ~$5 at $35 bankroll.

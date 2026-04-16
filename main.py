@@ -845,6 +845,10 @@ def _execute_momentum_trade(trade: dict, bankroll: float) -> bool:
     max_size = config.CRYPTO_MAX_POSITION_PCT * bankroll
     size_dollars = min(size_dollars, max_size)
 
+    tier = "A" if edge >= config.TIER_A_EDGE else "B"
+    if tier == "B":
+        size_dollars *= 0.5
+
     if size_dollars < config.MIN_ORDER_SIZE_USD:
         return False
 
@@ -854,7 +858,7 @@ def _execute_momentum_trade(trade: dict, bankroll: float) -> bool:
     print(f"\n  === MOMENTUM TRADE ===")
     print(f"  Market:  {trade['question'][:50]}")
     print(f"  Side:    {trade['outcome']} @ ${price:.3f}")
-    print(f"  Edge:    {edge:.1%}")
+    print(f"  Edge:    {edge:.1%} (Tier {tier})")
     print(f"  Shares:  {shares} (${cost:.2f})")
 
     # Detect symbol from question
@@ -1371,7 +1375,7 @@ def run_cycle():
                     trades_placed += 1
                     open_trades.append({"market_question": best_trade["question"], "outcome": best_trade["outcome"]})
                 else:
-                    print("[INFO] [MOMENTUM] No signals found | checked markets, no edge >= 3% at medium+ confidence")
+                    print("[INFO] [MOMENTUM] No signals found | no edge >= 1% after fees (Tier A/B thresholds)")
             else:
                 print("[INFO] [MOMENTUM] No crypto up/down markets found in filtered list")
         else:
