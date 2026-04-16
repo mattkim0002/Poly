@@ -1615,6 +1615,26 @@ def main():
     global _session_start_bankroll
     database.init_db()
 
+    # Moondev smoke-test — log a small sample so we can see the client works.
+    try:
+        import moondev_client
+        prices = moondev_client.get_prices()
+        sample = (prices[:3] if isinstance(prices, list) else
+                  dict(list(prices.items())[:3]) if isinstance(prices, dict) else
+                  prices)
+        print(f"[MOONDEV] get_prices() sample: {sample}")
+        try:
+            resp = moondev_client.call_moondev_ai(
+                [{"role": "user", "content": "ping"}], max_tokens=16
+            )
+            print(f"[MOONDEV] AI ok: {str(resp)[:80]}")
+        except moondev_client.MoondevAPIError as e:
+            print(f"[MOONDEV] AI not available: {e}")
+    except moondev_client.MoondevConfigError as e:
+        print(f"[MOONDEV] skipped — {e}")
+    except Exception as e:
+        print(f"[MOONDEV] smoke-test failed: {e}")
+
     # Cancel stale orders
     print("[INFO] Cancelling stale open orders...")
     try:

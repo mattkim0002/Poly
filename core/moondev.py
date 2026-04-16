@@ -1,24 +1,15 @@
-"""Moondev plugin — optional smart-money signal for the Claude gates.
+"""Moondev smart-money plugin — feeds signals into the Claude gates.
 
-Reads MOONDEV_API_KEY from the environment. If the key is missing or the
-HTTP call fails, returns a neutral signal so the bot keeps trading.
-
-The plugin NEVER decides trades on its own — it just ships an extra field
-into the Claude gate payload so Claude can weigh it alongside edge, flow,
-news, and macro bias.
+Thin adapter over `moondev_client`. Never raises — on missing key or API
+failure, returns a neutral signal so the bot keeps trading.
 """
 
-import os
 import time
 
-import httpx
-
+import moondev_client
 from utils.logger import log
 
-MOONDEV_BASE_URL = os.getenv("MOONDEV_BASE_URL", "https://api.moondev.com")
-MOONDEV_TIMEOUT = 4.0
 _CACHE_TTL_SEC = 60
-
 _cache: dict[str, tuple[float, dict]] = {}
 
 _NEUTRAL = {
@@ -27,24 +18,12 @@ _NEUTRAL = {
 }
 
 
-def _api_key() -> str:
-    return os.getenv("MOONDEV_API_KEY", "").strip()
-
-
 def get_profitable_wallet_signal(market_id: str) -> dict:
-    """Fetch smart-money activity for a Polymarket market.
+    """Return {"smart_money_net_flow": "in"|"out"|"neutral", "comment": str}.
 
-    Returns a dict like:
-        {"smart_money_net_flow": "in" | "out" | "neutral",
-         "comment": "short explanation"}
-
-    Always returns (never raises). Neutral = no data / not configured.
+    Always safe — swallows config + API errors.
     """
     if not market_id:
-        return dict(_NEUTRAL)
-
-    key = _api_key()
-    if not key:
         return dict(_NEUTRAL)
 
     now = time.time()
@@ -53,27 +32,34 @@ def get_profitable_wallet_signal(market_id: str) -> dict:
         return dict(hit[1])
 
     try:
-        resp = httpx.get(
-            f"{MOONDEV_BASE_URL}/v1/polymarket/smart-money",
-            params={"market_id": market_id},
-            headers={"Authorization": f"Bearer {key}"},
-            timeout=MOONDEV_TIMEOUT,
-        )
-        if resp.status_code != 200:
-            log.debug("moondev: HTTP %s for %s", resp.status_code, market_id[:16])
-            return dict(_NEUTRAL)
-
-        data = resp.json()
-        flow = str(data.get("net_flow", "neutral")).lower()
-        if flow not in ("in", "out", "neutral"):
-            flow = "neutral"
-        result = {
-            "smart_money_net_flow": flow,
-            "comment": str(data.get("comment", ""))[:160],
-        }
-        _cache[market_id] = (now, result)
-        return dict(result)
-
-    except Exception as e:
-        log.debug("moondev: fetch failed (%s)", e)
+        # We use the price/orderbook endpoints as a crude proxy for now.
+        # When Moondev exposes a smart-money endpoint, swap this block for it.
+        book = moondev_client.get_orderbook(market_id[:12])
+    except moondev_client.MoondevConfigError:
         return dict(_NEUTRAL)
+    except moondev_client.MoondevAPIError as e:
+        log.debug("moondev: %s", e)
+        return dict(_NEUTRAL)
+    except Exception as e:
+        log.debug("moondev: unexpected %s", e)
+        return dict(_NEUTRAL)
+
+    flow = "neutral"
+    comment = ""
+    if isinstance(book, dict):
+        bids = book.get("bid_volume") or book.get("bids_total")
+        asks = book.get("ask_volume") or book.get("asks_total")
+        try:
+            b, a = float(bids or 0), float(asks or 0)
+            if b + a > 0:
+                ratio = b / (b + a)
+                if ratio > 0.60:
+                    flow, comment = "in", f"bid/(bid+ask)={ratio:.2f}"
+                elif ratio < 0.40:
+                    flow, comment = "out", f"bid/(bid+ask)={ratio:.2f}"
+        except (TypeError, ValueError):
+            pass
+
+    result = {"smart_money_net_flow": flow, "comment": comment or "neutral depth"}
+    _cache[market_id] = (now, result)
+    return dict(result)
