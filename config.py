@@ -279,5 +279,17 @@ MACRO_REFRESH_SEC = 3 * 3600       # 3 hours
 # Need 2-3 cents above midpoint to cross the spread and get filled.
 PRICE_IMPROVEMENT = 0.03           # 3 cents — pay the spread to actually get filled
 
+# === Scanner Universe ===
+SCAN_ACTIVE_ONLY = True
+SCAN_LIMIT_PER_PAGE = 100
+SCAN_MAX_PAGES = 10             # up to 1000 markets per cycle
+MIN_24H_VOLUME = 500            # $500 24h volume minimum
+SCAN_MIN_LIQUIDITY = 200        # separate from legacy MIN_LIQUIDITY
+SCAN_SORT_BY = "volume24hr"
+SCAN_ALLOWED_TAGS: list = []    # empty = all tags
+SCAN_EXCLUDED_TAGS: list = ["sports", "esports", "entertainment", "pop-culture"]
+SCAN_KEYWORD_INCLUDE: list = [] # empty = no filter
+SCAN_KEYWORD_EXCLUDE: list = [] # empty = no filter
+
 # === Database ===
 DB_PATH = "polybot.db"
