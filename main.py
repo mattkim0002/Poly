@@ -18,10 +18,12 @@ sys.stderr.reconfigure(line_buffering=True)
 import config
 from core import database, market_data, trader, crypto_predictor, news, macro, moondev
 from core.market_filter import check_trade as market_filter_check
-from strategies.risk import calculate_r_multiple, expectancy, drawdown_multiplier, drawdown
-from strategies.arbitrage import scan_all_markets, execute_arb
+from strategies.sizing import calculate_r_multiple, expectancy, drawdown_multiplier, drawdown
+from strategies.arbitrage import scan_all_markets, size_arb
 from strategies.binance_lag import scan_binance_lag, claude_gate as binance_lag_claude_gate
 from strategies.ev import get_fee_rate, is_fee_free_market
+import risk_manager
+import execution
 from utils.logger import log
 
 _cycle_count = 0
@@ -190,7 +192,7 @@ def scan_threshold_opportunities(markets: list[dict]) -> list[dict]:
 
 
 def execute_threshold_trade(opp: dict, bankroll: float) -> bool:
-    """Execute a threshold mean-reversion trade with a limit order."""
+    """Execute a threshold mean-reversion trade with risk gate + execution chokepoint."""
     max_spend = min(bankroll * 0.25, bankroll - 2.0)
     if max_spend < config.MIN_ORDER_SIZE_USD:
         return False
@@ -202,6 +204,7 @@ def execute_threshold_trade(opp: dict, bankroll: float) -> bool:
     shares = max(shares, 5)
 
     cost = shares * price
+    edge = (1.0 - price) if opp["outcome"] == "Yes" else price
 
     print(f"\n  === THRESHOLD TRADE ===")
     print(f"  Market:  {opp['question'][:55]}")
@@ -210,31 +213,33 @@ def execute_threshold_trade(opp: dict, bankroll: float) -> bool:
     print(f"  TP:      ${opp['tp']:.2f}  SL: ${opp['sl']:.2f}")
     print(f"  =========================")
 
-    order_id = trader.place_limit_order(
-        token_id=opp["token_id"],
-        price=price,
-        size=shares,
-        side="BUY",
+    proposal = risk_manager.build_proposal(
+        strategy="threshold",
+        market_id=opp["market_id"],
+        side=opp["outcome"],
+        proposed_size_usdc=cost,
+        expected_profit_usdc=cost * edge,
+        net_edge_pct=edge,
     )
+    decision = risk_manager.evaluate_trade(proposal)
+    risk_manager.log_decision(proposal, decision)
 
-    if not order_id:
-        print(f"  [FAIL] Order failed")
+    if not decision["approved"]:
         return False
 
-    print(f"  [SUCCESS] Order placed: {order_id}")
-
-    database.record_trade(
-        market_id=opp["market_id"],
-        market_question=f"[THRESH] {opp['question'][:80]}",
+    order_id = execution.execute_buy(
+        risk_decision=decision,
         token_id=opp["token_id"],
-        side="BUY", outcome=opp["outcome"],
-        entry_price=price, size=shares, cost=cost,
-        order_id=order_id,
-        claude_probability=0.0, market_probability=price,
-        edge=(1.0 - price) if opp["outcome"] == "Yes" else price,
-        kelly_frac=0.0, dd_mult=1.0, signal_mult=1.0,
+        price=price,
+        shares=shares,
+        market_id=opp["market_id"],
+        question=f"[THRESH] {opp['question'][:80]}",
+        outcome=opp["outcome"],
+        strategy="threshold",
+        edge=edge,
+        market_probability=price,
     )
-    return True
+    return order_id is not None
 
 
 def _is_junk_market(question: str) -> bool:
@@ -488,21 +493,13 @@ def _endgame_claude_gate(snipe: dict) -> dict | None:
 
 
 def execute_snipe(snipe: dict, bankroll: float) -> bool:
-    """Execute an endgame trade — Claude gate + tight size cap.
-
-    Gate rules (all must pass):
-      - Claude returns decision == "approve"
-      - net_edge_pct from Claude >= ENDGAME_MIN_NET_EDGE
-      - Absolute profit >= ENDGAME_MIN_PROFIT_USD
-      - Position size <= ENDGAME_MAX_POSITION_PCT of bankroll
-    """
-    # Step 1: Claude endgame gate (blocking)
+    """Execute an endgame trade — Claude gate + risk_manager + execution chokepoint."""
     gate = _endgame_claude_gate(snipe)
     if not gate:
         return False
 
-    decision = gate.get("decision", "reject")
-    if decision != "approve":
+    gate_decision = gate.get("decision", "reject")
+    if gate_decision != "approve":
         print(f"  [ENDGAME] REJECT: {gate.get('reason', 'no reason')[:120]}")
         return False
 
@@ -511,7 +508,6 @@ def execute_snipe(snipe: dict, bankroll: float) -> bool:
         print(f"  [ENDGAME] REJECT: Claude net_edge {claude_net:.2%} < {config.ENDGAME_MIN_NET_EDGE:.0%}")
         return False
 
-    # Step 2: Sizing — cap at ENDGAME_MAX_POSITION_PCT
     max_spend = min(bankroll * config.ENDGAME_MAX_POSITION_PCT, bankroll - 2.0)
     if max_spend < config.MIN_ORDER_SIZE_USD:
         print(f"  [ENDGAME] REJECT: max_spend ${max_spend:.2f} too small")
@@ -521,17 +517,36 @@ def execute_snipe(snipe: dict, bankroll: float) -> bool:
     max_shares_by_bank = int(max_spend / price) if price > 0 else 0
     max_shares_by_book = int(snipe["ask_size"])
     shares = min(max_shares_by_bank, max_shares_by_book)
-    shares = max(shares, 5)  # Polymarket minimum
+    shares = max(shares, 5)
 
     cost = shares * price
     expected_profit = shares * snipe["profit_per_share"]
 
-    # Step 3: Absolute profit floor
     if expected_profit < config.ENDGAME_MIN_PROFIT_USD:
         print(f"  [ENDGAME] REJECT: profit ${expected_profit:.3f} < min ${config.ENDGAME_MIN_PROFIT_USD}")
         return False
 
-    print(f"\n  === ENDGAME TRADE (Claude approved) ===")
+    proposal = risk_manager.build_proposal(
+        strategy="endgame",
+        market_id=snipe["market_id"],
+        side=snipe["outcome"],
+        proposed_size_usdc=cost,
+        expected_profit_usdc=expected_profit,
+        net_edge_pct=snipe["profit_pct"],
+    )
+    decision = risk_manager.evaluate_trade(proposal)
+    risk_manager.log_decision(proposal, decision)
+
+    if not decision["approved"]:
+        return False
+
+    resized_cost = decision["final_size_usdc"]
+    if resized_cost < cost:
+        shares = max(5, int(resized_cost / price)) if price > 0 else 5
+        cost = shares * price
+        expected_profit = shares * snipe["profit_per_share"]
+
+    print(f"\n  === ENDGAME TRADE (Claude + Risk approved) ===")
     print(f"  Market:  {snipe['question'][:60]}")
     print(f"  Side:    {snipe['outcome']} @ ${price:.3f}")
     print(f"  Shares:  {shares}")
@@ -542,37 +557,19 @@ def execute_snipe(snipe: dict, bankroll: float) -> bool:
     print(f"  Fees:    {fee_str}")
     print(f"  ========================================")
 
-    order_id = trader.place_limit_order(
+    order_id = execution.execute_buy(
+        risk_decision=decision,
         token_id=snipe["token_id"],
         price=price,
-        size=shares,
-        side="BUY",
-    )
-
-    if not order_id:
-        print(f"  [FAIL] Order failed")
-        return False
-
-    print(f"  [SUCCESS] Order placed: {order_id}")
-
-    database.record_trade(
+        shares=shares,
         market_id=snipe["market_id"],
-        market_question=f"[ENDGAME] {snipe['question'][:80]}",
-        token_id=snipe["token_id"],
-        side="BUY",
+        question=f"[ENDGAME] {snipe['question'][:80]}",
         outcome=snipe["outcome"],
-        entry_price=price,
-        size=shares,
-        cost=cost,
-        order_id=order_id,
-        claude_probability=0.0,
-        market_probability=price,
+        strategy="endgame",
         edge=snipe["profit_pct"],
-        kelly_frac=0.0,
-        dd_mult=1.0,
-        signal_mult=1.0,
+        market_probability=price,
     )
-    return True
+    return order_id is not None
 
 
 # ──────────────────────────────────────────────────────────
@@ -893,33 +890,41 @@ def _execute_momentum_trade(trade: dict, bankroll: float) -> bool:
 
     print(f"  ======================")
 
-    order_id = trader.place_limit_order(
-        token_id=trade["token_id"],
-        price=price,
-        size=shares,
-        side="BUY",
+    proposal = risk_manager.build_proposal(
+        strategy="momentum",
+        market_id=trade["market_id"],
+        side=trade["outcome"],
+        proposed_size_usdc=cost,
+        expected_profit_usdc=cost * edge,
+        net_edge_pct=edge,
     )
+    risk_decision = risk_manager.evaluate_trade(proposal)
+    risk_manager.log_decision(proposal, risk_decision)
 
-    if not order_id:
-        print(f"  [FAIL] Order failed")
+    if not risk_decision["approved"]:
         return False
 
-    print(f"  [SUCCESS] Order placed: {order_id}")
+    resized_cost = risk_decision["final_size_usdc"]
+    if resized_cost < cost:
+        shares = max(5, int(resized_cost / price)) if price > 0 else 5
+        cost = shares * price
 
-    database.record_trade(
-        market_id=trade["market_id"],
-        market_question=trade["question"],
+    order_id = execution.execute_buy(
+        risk_decision=risk_decision,
         token_id=trade["token_id"],
-        side="BUY", outcome=trade["outcome"],
-        entry_price=price, size=shares, cost=cost,
-        order_id=order_id,
+        price=price,
+        shares=shares,
+        market_id=trade["market_id"],
+        question=trade["question"],
+        outcome=trade["outcome"],
+        strategy="momentum",
+        edge=edge,
         claude_probability=trade["probability"],
         market_probability=price,
-        edge=edge, kelly_frac=config.KELLY_FRACTION,
-        dd_mult=1.0, signal_mult=1.0,
+        kelly_frac=config.KELLY_FRACTION,
         end_date=trade.get("end_date", ""),
     )
-    return True
+    return order_id is not None
 
 
 # ──────────────────────────────────────────────────────────
@@ -1031,45 +1036,47 @@ def run_cycle():
         arb_opportunities = scan_all_markets(markets)
 
         if arb_opportunities:
-            # Cap to 1 fill per cycle (was 2) to prevent 15-second capital bursts
             for arb in arb_opportunities[:1]:
                 if bankroll < config.MIN_ORDER_SIZE_USD * 2:
                     break
-                # Duplicate-exposure gate: arb loads BOTH sides, so skip if asset is already held
                 arb_question = arb.get("question", "")
                 arb_asset = extract_asset_key(arb_question)
                 if arb_asset and any(extract_asset_key(t.get("market_question", "")) == arb_asset for t in open_trades):
                     print(f"  [ARB] BLOCK: already hold {arb_asset}")
                     continue
-                result = execute_arb(arb, bankroll)
+
+                sized = size_arb(arb, bankroll)
+                if not sized:
+                    continue
+
+                proposal = risk_manager.build_proposal(
+                    strategy="arb",
+                    market_id=sized["market_id"],
+                    side="BOTH",
+                    proposed_size_usdc=sized["total_cost"],
+                    expected_profit_usdc=sized["expected_profit"],
+                    net_edge_pct=sized["profit_pct"],
+                )
+                decision = risk_manager.evaluate_trade(proposal)
+                risk_manager.log_decision(proposal, decision)
+
+                if not decision["approved"]:
+                    continue
+
+                result = execution.execute_arb_pair(
+                    risk_decision=decision,
+                    yes_token=sized["yes_token"],
+                    no_token=sized["no_token"],
+                    yes_price=sized["yes_price"],
+                    no_price=sized["no_price"],
+                    shares=sized["shares"],
+                    market_id=sized["market_id"],
+                    question=sized["question"],
+                    profit_pct=sized["profit_pct"],
+                )
                 if result:
                     trades_placed += 1
                     bankroll -= result["total_cost"]
-                    database.record_trade(
-                        market_id=result["market_id"],
-                        market_question=f"[ARB-YES] {result['question'][:80]}",
-                        token_id=result["yes_token"],
-                        side="BUY", outcome="Yes",
-                        entry_price=result["yes_price"], size=result["shares"],
-                        cost=result["shares"] * result["yes_price"],
-                        order_id=result["yes_order"],
-                        claude_probability=0.0, market_probability=result["yes_price"],
-                        edge=result["profit_pct"], kelly_frac=0.0,
-                        dd_mult=1.0, signal_mult=1.0,
-                    )
-                    database.record_trade(
-                        market_id=result["market_id"],
-                        market_question=f"[ARB-NO] {result['question'][:80]}",
-                        token_id=result["no_token"],
-                        side="BUY", outcome="No",
-                        entry_price=result["no_price"], size=result["shares"],
-                        cost=result["shares"] * result["no_price"],
-                        order_id=result["no_order"],
-                        claude_probability=0.0, market_probability=result["no_price"],
-                        edge=result["profit_pct"], kelly_frac=0.0,
-                        dd_mult=1.0, signal_mult=1.0,
-                    )
-                    # Track for in-cycle duplicate-exposure checks of later strategies
                     open_trades.append({"market_question": f"[ARB-YES] {result['question'][:80]}", "outcome": "Yes"})
                     open_trades.append({"market_question": f"[ARB-NO] {result['question'][:80]}", "outcome": "No"})
 
@@ -1164,7 +1171,6 @@ def run_cycle():
 
                 print(f"  [BINANCE-LAG] APPROVED by Claude: {reason} (confidence={confidence})")
 
-                # Position sizing: capped at BINANCE_LAG_MAX_POSITION_PCT of total equity
                 max_spend = min(total_equity * config.BINANCE_LAG_MAX_POSITION_PCT, bankroll - 2.0)
                 if max_spend < config.MIN_ORDER_SIZE_USD:
                     print(f"  [BINANCE-LAG] Insufficient funds (${max_spend:.2f})")
@@ -1174,32 +1180,46 @@ def run_cycle():
                 shares = max(5, int(max_spend / price)) if price > 0 else 5
                 cost = shares * price
 
+                proposal = risk_manager.build_proposal(
+                    strategy="binance-lag",
+                    market_id=cand["market"]["id"],
+                    side=cand["side"],
+                    proposed_size_usdc=cost,
+                    expected_profit_usdc=cost * cand["edge"],
+                    net_edge_pct=cand["edge"],
+                    confidence=confidence,
+                )
+                decision = risk_manager.evaluate_trade(proposal)
+                risk_manager.log_decision(proposal, decision)
+
+                if not decision["approved"]:
+                    continue
+
+                resized_cost = decision["final_size_usdc"]
+                if resized_cost < cost:
+                    shares = max(5, int(resized_cost / price)) if price > 0 else 5
+                    cost = shares * price
+
                 print(f"  [BINANCE-LAG] EXECUTING: {cand['coin']} {cand['side']} | "
                       f"{shares} shares @ ${price:.3f} (${cost:.2f}) | edge={cand['edge']:.1%}")
 
-                order_id = trader.place_limit_order(
+                order_id = execution.execute_buy(
+                    risk_decision=decision,
                     token_id=cand["token_id"],
                     price=price,
-                    size=shares,
-                    side="BUY",
+                    shares=shares,
+                    market_id=cand["market"]["id"],
+                    question=f"[LAG] {cand['question'][:80]}",
+                    outcome=cand["outcome"],
+                    strategy="binance-lag",
+                    edge=cand["edge"],
+                    claude_probability=cand["true_prob"],
+                    market_probability=price,
+                    kelly_frac=config.BINANCE_LAG_MAX_POSITION_PCT,
+                    end_date=cand["market"].get("end_date", ""),
                 )
 
                 if order_id:
-                    print(f"  [BINANCE-LAG] Order placed: {order_id}")
-                    database.record_trade(
-                        market_id=cand["market"]["id"],
-                        market_question=f"[LAG] {cand['question'][:80]}",
-                        token_id=cand["token_id"],
-                        side="BUY", outcome=cand["outcome"],
-                        entry_price=price, size=shares, cost=cost,
-                        order_id=order_id,
-                        claude_probability=cand["true_prob"],
-                        market_probability=price,
-                        edge=cand["edge"],
-                        kelly_frac=config.BINANCE_LAG_MAX_POSITION_PCT,
-                        dd_mult=1.0, signal_mult=1.0,
-                        end_date=cand["market"].get("end_date", ""),
-                    )
                     trades_placed += 1
                     bankroll -= cost
                     open_trades.append({"market_question": f"[LAG] {cand['question'][:80]}", "outcome": cand["outcome"]})
@@ -1614,6 +1634,7 @@ def macro_watcher_thread():
 def main():
     global _session_start_bankroll
     database.init_db()
+    execution.log_mode()
 
     # Moondev smoke-test — log a small sample so we can see the client works.
     try:

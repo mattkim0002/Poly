@@ -15,7 +15,7 @@ Geopolitics/world events = ZERO fees → best arb targets.
 """
 
 from datetime import datetime, timezone
-from core import trader
+from core import trader  # still needed for get_orderbook in scanner
 from strategies.ev import get_fee_rate, calculate_taker_fee, is_fee_free_market
 from utils.logger import log
 import config
@@ -158,10 +158,11 @@ def scan_all_markets(markets: list[dict]) -> list[dict]:
     return opportunities
 
 
-def execute_arb(arb: dict, bankroll: float) -> dict | None:
-    """Execute an arbitrage trade — buy both sides simultaneously.
+def size_arb(arb: dict, bankroll: float) -> dict | None:
+    """Compute arb sizing without placing orders.
 
-    Returns dict with order details or None if failed.
+    Returns a sized plan dict, or None if sizing fails.
+    Caller is responsible for routing through risk_manager → execution.
     """
     max_cost = bankroll * config.ARB_MAX_POSITION_PCT
     cost_per_pair = arb["total_cost"]
@@ -187,35 +188,6 @@ def execute_arb(arb: dict, bankroll: float) -> dict | None:
     print(f"  Profit:  ${expected_profit:.2f} ({arb['profit_pct']:.1%})")
     print(f"  =================")
 
-    # Place YES order
-    yes_order = trader.place_limit_order(
-        token_id=arb["yes_token"],
-        price=arb["yes_price"],
-        size=shares,
-        side="BUY",
-    )
-
-    if not yes_order:
-        print(f"  FAILED: YES order failed")
-        return None
-
-    # Place NO order
-    no_order = trader.place_limit_order(
-        token_id=arb["no_token"],
-        price=arb["no_price"],
-        size=shares,
-        side="BUY",
-    )
-
-    if not no_order:
-        print(f"  WARNING: NO order failed — YES order is naked!")
-        print(f"  Cancelling YES order {yes_order}...")
-        trader.cancel_order(yes_order)
-        return None
-
-    print(f"  YES order: {yes_order}")
-    print(f"  NO order:  {no_order}")
-
     return {
         "question": arb["question"],
         "market_id": arb["market_id"],
@@ -227,6 +199,4 @@ def execute_arb(arb: dict, bankroll: float) -> dict | None:
         "total_cost": total_cost,
         "expected_profit": expected_profit,
         "profit_pct": arb["profit_pct"],
-        "yes_order": yes_order,
-        "no_order": no_order,
     }

@@ -205,7 +205,17 @@ MAX_POSITION_PCT = 0.15            # 15% max per trade (~$5 at $35)
 MAX_OPEN_POSITIONS = 2             # Keep buffer cash for sell orders
 MIN_ORDER_SIZE_USD = 1.0           # Platform min is 5 shares regardless
 
-# === Risk Management ===
+# === Risk Manager (hard gates — enforced by risk_manager.py) ===
+MAX_TRADE_SIZE_USDC = 5.0          # Absolute max per trade
+MAX_RISK_PCT_PER_TRADE = 0.15      # % of bankroll per trade
+MIN_BANKROLL_TO_TRADE = 10.0       # Stop trading below this
+MIN_EXPECTED_PROFIT_USDC = 0.02    # Min expected profit per trade
+MAX_TOTAL_OPEN_EXPOSURE_PCT = 0.50 # Total open exposure cap
+MAX_EXPOSURE_PER_MARKET_PCT = 0.20 # Per-market exposure cap
+DAILY_LOSS_CAP_PCT = 0.20          # Daily loss cap (% of bankroll)
+MAX_CONSECUTIVE_LOSSES = 3         # Pause after N consecutive losses
+
+# === Risk Management (soft sizing) ===
 DD_THRESHOLD_HALF = 0.20           # Halve at 20% drawdown ($7 loss)
 DD_THRESHOLD_STOP = 0.35           # Stop at 35% drawdown ($12 loss)
 

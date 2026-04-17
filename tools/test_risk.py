@@ -8,7 +8,7 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import risk
+import risk_manager as risk
 
 # Simulate a $38 bankroll with $3 open exposure, flat P&L, no recent losses.
 STATE = {
