@@ -3,12 +3,15 @@
 import httpx
 
 import config
+from core.candidate import Candidate
 from utils.logger import log
 
 
-def get_active_markets(limit: int = 100) -> list[dict]:
+def get_active_markets(limit: int = 100) -> list[Candidate]:
     """Fetch active, tradeable markets using the expanded scanner.
 
+    Returns list[Candidate]. Each Candidate supports dict-style access
+    (c["key"], c.get("key")) for backward compatibility.
     Falls back to the legacy fetch if the scanner returns nothing.
     """
     from core.scanner import scan_universe
@@ -100,7 +103,7 @@ def get_active_markets(limit: int = 100) -> list[dict]:
             except (json.JSONDecodeError, TypeError, ValueError):
                 outcome_prices = []
 
-        filtered.append({
+        raw = {
             "id": m.get("id"),
             "question": m.get("question", ""),
             "outcomes": outcomes,
@@ -109,7 +112,10 @@ def get_active_markets(limit: int = 100) -> list[dict]:
             "volume": volume,
             "liquidity": liquidity,
             "end_date": m.get("endDate") or m.get("end_date_iso") or "",
-        })
+        }
+        cand = Candidate.from_api_dict(raw)
+        if cand:
+            filtered.append(cand)
 
     log.info("Fetched %d markets, %d pass filters", len(markets), len(filtered))
     return filtered

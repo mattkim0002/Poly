@@ -1,9 +1,10 @@
 """Expanded market scanner — fetches a much larger Polymarket universe.
 
 Pipeline:
-  scan_universe() → raw candidate list (dicts with scanner_score)
+  scan_universe() → list[Candidate] (canonical scanner output)
 
-The output feeds the strategy engine unchanged. No trade logic here.
+Candidate objects support dict-style access (c["key"], c.get("key"))
+for backward compatibility with strategy code that hasn't migrated yet.
 """
 
 import json
@@ -13,6 +14,7 @@ from datetime import datetime, timezone
 import httpx
 
 import config
+from core.candidate import Candidate
 from utils.logger import log
 
 
@@ -86,14 +88,14 @@ def _parse_token_ids(market: dict) -> list[str]:
     return ids or []
 
 
-def scan_universe(debug: bool = False) -> list[dict]:
+def scan_universe(debug: bool = False) -> list[Candidate]:
     """Fetch and score a large universe of Polymarket markets.
 
-    Returns list of candidate dicts sorted by scanner_score desc.
-    Applies volume/liquidity/tag/keyword pre-filters.
+    Returns list of Candidate objects sorted by scanner_score desc.
+    Each Candidate supports dict-style access via raw_source for compat.
     """
     raw_total = 0
-    candidates = []
+    candidates: list[Candidate] = []
     seen_ids: set = set()
 
     for page in range(config.SCAN_MAX_PAGES):
@@ -154,27 +156,43 @@ def scan_universe(debug: bool = False) -> list[dict]:
             score = _scanner_score(vol24, liquidity, minutes_left)
 
             tag_label = (tags[0] if tags else "")
+            end_date = m.get("endDate") or m.get("end_date_iso") or ""
 
-            candidates.append({
+            raw = {
                 "market_id": mid,
                 "id": mid,
                 "question": question,
                 "tag": tag_label,
-                "end_date": m.get("endDate") or m.get("end_date_iso") or "",
+                "end_date": end_date,
                 "volume_24h": vol24,
                 "liquidity": liquidity,
                 "yes_price": yes_price,
                 "no_price": no_price,
                 "time_to_expiry_minutes": minutes_left,
                 "scanner_score": score,
-                # Fields the strategy engine expects
                 "outcomes": json.loads(m["outcomes"]) if isinstance(m.get("outcomes"), str) else (m.get("outcomes") or ["Yes", "No"]),
                 "outcome_prices": [yes_price, no_price],
                 "token_ids": token_ids,
                 "volume": float(m.get("volume", 0) or 0),
-            })
+            }
 
-    candidates.sort(key=lambda x: x["scanner_score"], reverse=True)
+            candidates.append(Candidate(
+                market_id=mid,
+                question=question,
+                yes_token_id=token_ids[0],
+                no_token_id=token_ids[1] if len(token_ids) > 1 else "",
+                yes_price=yes_price,
+                no_price=no_price,
+                pair_cost=yes_price + no_price,
+                minutes_to_expiry=minutes_left if minutes_left is not None else 999.0,
+                liquidity=liquidity,
+                volume=vol24,
+                scanner_score=score,
+                end_date=end_date,
+                raw_source=raw,
+            ))
+
+    candidates.sort(key=lambda x: x.scanner_score, reverse=True)
 
     if debug:
         print(f"\n[SCANNER] Raw fetched: {raw_total} | After filters: {len(candidates)}")
