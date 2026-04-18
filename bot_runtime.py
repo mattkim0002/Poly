@@ -101,7 +101,7 @@ THRESHOLD_SL_YES = 0.45
 THRESHOLD_SL_NO = 0.55
 
 
-def scan_threshold_opportunities(markets: list[dict]) -> list[dict]:
+def scan_threshold_opportunities(markets: list[Candidate]) -> list[dict]:
     """Scan crypto markets for extreme-price mean-reversion entries."""
     now = datetime.now(timezone.utc)
     seconds_into_candle = (now.minute % 5) * 60 + now.second
@@ -112,28 +112,22 @@ def scan_threshold_opportunities(markets: list[dict]) -> list[dict]:
 
     opportunities = []
 
-    for market in markets:
-        question = (market.get("question") or "")
-        q_lower = question.lower()
-        token_ids = market.get("token_ids", [])
+    for cand in markets:
+        q_lower = cand.question.lower()
 
-        if "up or down" not in q_lower or len(token_ids) < 2:
+        if "up or down" not in q_lower or not cand.yes_token_id or not cand.no_token_id:
             continue
 
-        end_date = market.get("end_date") or market.get("endDate") or ""
-        if end_date:
+        if cand.end_date:
             try:
-                end_dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+                end_dt = datetime.fromisoformat(cand.end_date.replace("Z", "+00:00"))
                 minutes_left = (end_dt - datetime.now(timezone.utc)).total_seconds() / 60
                 if minutes_left < 2 or minutes_left > 30:
                     continue
             except (ValueError, TypeError):
                 continue
 
-        yes_token = token_ids[0]
-        no_token = token_ids[1]
-
-        book = trader.get_orderbook(yes_token)
+        book = trader.get_orderbook(cand.yes_token_id)
         if not book or not book.get("asks"):
             continue
 
@@ -150,13 +144,13 @@ def scan_threshold_opportunities(markets: list[dict]) -> list[dict]:
             if symbol:
                 binance_prob = crypto_predictor.get_binance_implied_probability(symbol)
                 if binance_prob is not None and binance_prob < 0.35:
-                    print(f"[THRESHOLD] SKIP YES {question[:50]} — Binance confirms DOWN ({binance_prob:.0%})")
+                    print(f"[THRESHOLD] SKIP YES {cand.question[:50]} — Binance confirms DOWN ({binance_prob:.0%})")
                     continue
 
-            print(f"[THRESHOLD] BUY YES {question[:50]} at {yes_ask*100:.0f}c — TP: 95c SL: 45c")
+            print(f"[THRESHOLD] BUY YES {cand.question[:50]} at {yes_ask*100:.0f}c — TP: 95c SL: 45c")
             opportunities.append({
-                "question": question, "market_id": market.get("id", ""),
-                "token_id": yes_token, "outcome": "Yes",
+                "question": cand.question, "market_id": cand.market_id,
+                "token_id": cand.yes_token_id, "outcome": "Yes",
                 "ask_price": yes_ask, "ask_size": yes_ask_size,
                 "tp": THRESHOLD_TP_YES, "sl": THRESHOLD_SL_YES,
             })
@@ -165,19 +159,19 @@ def scan_threshold_opportunities(markets: list[dict]) -> list[dict]:
             if symbol:
                 binance_prob = crypto_predictor.get_binance_implied_probability(symbol)
                 if binance_prob is not None and binance_prob > 0.65:
-                    print(f"[THRESHOLD] SKIP NO {question[:50]} — Binance confirms UP ({binance_prob:.0%})")
+                    print(f"[THRESHOLD] SKIP NO {cand.question[:50]} — Binance confirms UP ({binance_prob:.0%})")
                     continue
 
-            no_book = trader.get_orderbook(no_token)
+            no_book = trader.get_orderbook(cand.no_token_id)
             if not no_book or not no_book.get("asks"):
                 continue
             no_ask = no_book["asks"][0]["price"]
             no_ask_size = no_book["asks"][0]["size"]
 
-            print(f"[THRESHOLD] BUY NO {question[:50]} at {no_ask*100:.0f}c — TP: 5c SL: 55c")
+            print(f"[THRESHOLD] BUY NO {cand.question[:50]} at {no_ask*100:.0f}c — TP: 5c SL: 55c")
             opportunities.append({
-                "question": question, "market_id": market.get("id", ""),
-                "token_id": no_token, "outcome": "No",
+                "question": cand.question, "market_id": cand.market_id,
+                "token_id": cand.no_token_id, "outcome": "No",
                 "ask_price": no_ask, "ask_size": no_ask_size,
                 "tp": THRESHOLD_TP_NO, "sl": THRESHOLD_SL_NO,
             })
@@ -245,10 +239,9 @@ def _is_allowed_market_duration(question: str) -> bool:
     return True
 
 
-def _hard_filter_market(market: dict) -> tuple[bool, str]:
+def _hard_filter_market(market: Candidate) -> tuple[bool, str]:
     """Crypto-only + anti-coinflip + anti-lottery-ticket filters. Returns (passes, reason)."""
-    question = market.get("question", "") or ""
-    q_lower = question.lower()
+    q_lower = market.question.lower()
 
     if getattr(config, "CRYPTO_ONLY", False):
         import re
@@ -256,10 +249,9 @@ def _hard_filter_market(market: dict) -> tuple[bool, str]:
             return (False, "not crypto")
 
     if "up or down" in q_lower:
-        end_date = market.get("end_date") or ""
-        if end_date:
+        if market.end_date:
             try:
-                end_dt = datetime.fromisoformat(str(end_date).replace("Z", "+00:00"))
+                end_dt = datetime.fromisoformat(str(market.end_date).replace("Z", "+00:00"))
                 hours_left = (end_dt - datetime.now(timezone.utc)).total_seconds() / 3600.0
                 if hours_left < config.MIN_RESOLUTION_HOURS:
                     mins_left = hours_left * 60.0
@@ -267,12 +259,7 @@ def _hard_filter_market(market: dict) -> tuple[bool, str]:
             except (ValueError, TypeError):
                 pass
 
-    prices = market.get("outcome_prices") or []
-    for price in prices:
-        try:
-            p = float(price)
-        except (TypeError, ValueError):
-            continue
+    for p in (market.yes_price, market.no_price):
         if 0 < p < config.MIN_PRICE_FLOOR:
             return (False, f"price {p*100:.1f}\u00a2 below {config.MIN_PRICE_FLOOR*100:.0f}\u00a2 minimum")
 
@@ -900,24 +887,23 @@ def run_cycle():
         _record_equity(bankroll, live_pos_value)
         return
 
-    markets = [m for m in markets if not _is_junk_market(m.get("question", ""))]
+    markets = [m for m in markets if not _is_junk_market(m.question)]
     open_token_ids = {t["token_id"] for t in open_trades}
-    markets = [m for m in markets if not any(tid in open_token_ids for tid in m.get("token_ids", []))]
-    markets = [m for m in markets if _is_allowed_market_duration(m.get("question", ""))]
+    markets = [m for m in markets if m.yes_token_id not in open_token_ids and m.no_token_id not in open_token_ids]
+    markets = [m for m in markets if _is_allowed_market_duration(m.question)]
 
     hard_filtered = []
     for m in markets:
         passes, reason = _hard_filter_market(m)
         if not passes:
-            q_short = (m.get("question", "") or "")[:50]
-            print(f"  [FILTER] SKIP {q_short} — {reason}")
+            print(f"  [FILTER] SKIP {m.question[:50]} — {reason}")
             continue
         hard_filtered.append(m)
     markets = hard_filtered
 
     active = _get_active_strategies()
-    crypto_updown = [m for m in markets if "up or down" in m.get("question", "").lower()]
-    crypto_all = [m for m in markets if any(k in m.get("question", "").lower()
+    crypto_updown = [m for m in markets if "up or down" in m.question.lower()]
+    crypto_all = [m for m in markets if any(k in m.question.lower()
                   for k in ["bitcoin", "btc", "ethereum", "eth", "solana", "sol", "xrp", "bnb", "doge", "crypto"])]
     print(f"[INFO] {len(markets)} markets to scan ({len(crypto_updown)} up/down, {len(crypto_all)} crypto total) | ACTIVE_STRATEGIES = {active}")
 
@@ -994,7 +980,7 @@ def run_cycle():
                 lag_trades = []
 
         if len(lag_trades) < config.BINANCE_LAG_AUTO_DISABLE_TRADES:
-            crypto_lag_markets = [m for m in markets if "up or down" in m.get("question", "").lower()]
+            crypto_lag_markets = [m for m in markets if "up or down" in m.question.lower()]
             print(f"[INFO] [BINANCE-LAG] Scanning {len(crypto_lag_markets)} up/down markets for lag opportunities...")
             lag_candidates = scan_binance_lag(markets)
 
@@ -1072,7 +1058,7 @@ def run_cycle():
                 cost = shares * price
 
                 proposal = risk_manager.build_proposal(
-                    strategy="binance-lag", market_id=cand["market"]["id"],
+                    strategy="binance-lag", market_id=cand["market_id"],
                     side=cand["side"], proposed_size_usdc=cost,
                     expected_profit_usdc=cost * cand["edge"],
                     net_edge_pct=cand["edge"], confidence=confidence,
@@ -1093,13 +1079,13 @@ def run_cycle():
 
                 order_id = execution.execute_buy(
                     risk_decision=decision, token_id=cand["token_id"],
-                    price=price, shares=shares, market_id=cand["market"]["id"],
+                    price=price, shares=shares, market_id=cand["market_id"],
                     question=f"[LAG] {cand['question'][:80]}",
                     outcome=cand["outcome"], strategy="binance-lag",
                     edge=cand["edge"], claude_probability=cand["true_prob"],
                     market_probability=price,
                     kelly_frac=config.BINANCE_LAG_MAX_POSITION_PCT,
-                    end_date=cand["market"].get("end_date", ""),
+                    end_date=cand.get("end_date", ""),
                 )
 
                 if order_id:
@@ -1138,26 +1124,23 @@ def run_cycle():
 
         if regime in ("trending", "choppy"):
             crypto_markets = [m for m in markets
-                              if crypto_predictor.is_crypto_updown_market(m.get("question", ""))]
+                              if crypto_predictor.is_crypto_updown_market(m.question)]
 
             if crypto_markets:
                 print(f"[INFO] Evaluating {len(crypto_markets)} crypto markets (regime={regime}, candle={candle['phase']})...")
                 best_trade = None
                 best_edge = 0.0
 
-                for market in crypto_markets:
-                    question = market["question"]
-                    token_ids = market.get("token_ids", [])
-                    if len(token_ids) < 2:
+                for cand in crypto_markets:
+                    if not cand.yes_token_id or not cand.no_token_id:
                         continue
 
-                    yes_token, no_token = token_ids[0], token_ids[1]
-                    yes_price = trader.get_midpoint(yes_token)
-                    no_price = trader.get_midpoint(no_token)
+                    yes_price = trader.get_midpoint(cand.yes_token_id)
+                    no_price = trader.get_midpoint(cand.no_token_id)
                     if not yes_price or not no_price:
                         continue
 
-                    q_lower = question.lower()
+                    q_lower = cand.question.lower()
                     symbol = None
                     for coin, sym in crypto_predictor.BINANCE_SYMBOLS.items():
                         if coin in q_lower:
@@ -1168,59 +1151,59 @@ def run_cycle():
 
                     if binance_prob is not None and yes_price > 0:
                         gap = binance_prob - yes_price
-                        print(f"  [GAP SIGNAL] {question[:40]} | Binance={binance_prob:.0%} Polymarket={yes_price:.0%} Gap={gap:+.0%}")
+                        print(f"  [GAP SIGNAL] {cand.question[:40]} | Binance={binance_prob:.0%} Polymarket={yes_price:.0%} Gap={gap:+.0%}")
 
                         if yes_price < 0.25 or yes_price > 0.75:
-                            print(f"  [GAP] SKIP {question[:40]}: price {yes_price:.2f} outside 0.25-0.75 band (market already decided)")
+                            print(f"  [GAP] SKIP {cand.question[:40]}: price {yes_price:.2f} outside 0.25-0.75 band (market already decided)")
                         elif gap >= config.MIN_EDGE_CRYPTO:
                             conf_label = "high" if gap >= config.TIER_A_EDGE else "medium"
                             best_edge = gap
                             best_trade = {
-                                "market_id": market["id"], "question": question,
-                                "token_id": yes_token, "outcome": "Yes",
+                                "market_id": cand.market_id, "question": cand.question,
+                                "token_id": cand.yes_token_id, "outcome": "Yes",
                                 "price": yes_price, "probability": binance_prob,
                                 "edge": gap, "signal": {"confidence": conf_label, "combo": "gap", "kelly_mult": 1.0,
                                                          "reasoning": f"Gap={gap:.0%} Binance={binance_prob:.0%}"},
-                                "end_date": market.get("end_date", ""),
+                                "end_date": cand.end_date,
                             }
                             continue
                         elif gap <= -config.MIN_EDGE_CRYPTO:
                             conf_label = "high" if abs(gap) >= config.TIER_A_EDGE else "medium"
                             best_edge = abs(gap)
                             best_trade = {
-                                "market_id": market["id"], "question": question,
-                                "token_id": no_token, "outcome": "No",
+                                "market_id": cand.market_id, "question": cand.question,
+                                "token_id": cand.no_token_id, "outcome": "No",
                                 "price": no_price, "probability": 1.0 - binance_prob,
                                 "edge": abs(gap), "signal": {"confidence": conf_label, "combo": "gap", "kelly_mult": 1.0,
                                                               "reasoning": f"Gap={gap:.0%} Binance={binance_prob:.0%}"},
-                                "end_date": market.get("end_date", ""),
+                                "end_date": cand.end_date,
                             }
                             continue
 
-                    for outcome, token_id, price in [("Yes", yes_token, yes_price), ("No", no_token, no_price)]:
+                    for outcome, token_id, price in [("Yes", cand.yes_token_id, yes_price), ("No", cand.no_token_id, no_price)]:
                         if price < 0.25 or price > 0.75:
-                            print(f"  [MOMENTUM] SKIP {question[:30]} {outcome} @ {price:.2f}: outside 0.25-0.75 band")
+                            print(f"  [MOMENTUM] SKIP {cand.question[:30]} {outcome} @ {price:.2f}: outside 0.25-0.75 band")
                             continue
-                        result = crypto_predictor.estimate_crypto_probability(question, price, outcome)
+                        result = crypto_predictor.estimate_crypto_probability(cand.question, price, outcome)
                         if not result:
-                            print(f"  [MOMENTUM] {question[:30]} {outcome} → rejected by crypto_predictor (see INFO log)")
+                            print(f"  [MOMENTUM] {cand.question[:30]} {outcome} → rejected by crypto_predictor (see INFO log)")
                             continue
                         edge = abs(result["probability"] - price)
                         if edge < config.MIN_EDGE_CRYPTO:
-                            print(f"  [MOMENTUM] {question[:30]} {outcome} @ {price:.2f} prob={result['probability']:.2f} edge={edge:+.1%} < {config.MIN_EDGE_CRYPTO:.0%}")
+                            print(f"  [MOMENTUM] {cand.question[:30]} {outcome} @ {price:.2f} prob={result['probability']:.2f} edge={edge:+.1%} < {config.MIN_EDGE_CRYPTO:.0%}")
                             continue
                         tier_here = "A" if edge >= config.TIER_A_EDGE else "B"
                         if tier_here == "A" and result.get("confidence") == "low":
-                            print(f"  [MOMENTUM] {question[:30]} {outcome} edge={edge:.1%} Tier A but low confidence → skip")
+                            print(f"  [MOMENTUM] {cand.question[:30]} {outcome} edge={edge:.1%} Tier A but low confidence → skip")
                             continue
                         if edge > best_edge:
                             best_edge = edge
                             best_trade = {
-                                "market_id": market["id"], "question": question,
+                                "market_id": cand.market_id, "question": cand.question,
                                 "token_id": token_id, "outcome": outcome,
                                 "price": price, "probability": result["probability"],
                                 "edge": edge, "signal": result,
-                                "end_date": market.get("end_date", ""),
+                                "end_date": cand.end_date,
                             }
 
                 if best_trade:

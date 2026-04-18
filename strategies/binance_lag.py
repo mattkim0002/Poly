@@ -8,6 +8,7 @@ Only trades BTC, SOL, XRP on 5-minute "Up or Down" markets.
 
 import json
 from core import crypto_predictor, news, trader
+from core.candidate import Candidate
 from utils.logger import log
 
 # Coins this strategy is allowed to trade
@@ -71,21 +72,20 @@ headlines or missing coinbase data.
 No text outside the JSON."""
 
 
-def scan_binance_lag(markets: list[dict]) -> list[dict]:
-    """Scan markets for Binance-lag opportunities.
+def scan_binance_lag(markets: list[Candidate]) -> list[dict]:
+    """Scan Candidates for Binance-lag opportunities.
 
-    Returns list of candidate trades with all data for Claude gate.
+    Returns list of lag-opportunity dicts with all data for Claude gate.
     Logs per-coin diagnostics (why skipped) so dry cycles are visible.
     """
     candidates = []
     seen_symbols: set[str] = set()
 
     for market in markets:
-        question = market.get("question", "")
+        question = market.question
         q_lower = question.lower()
-        token_ids = market.get("token_ids", [])
 
-        if "up or down" not in q_lower or len(token_ids) < 2:
+        if "up or down" not in q_lower or not market.yes_token_id or not market.no_token_id:
             continue
 
         # Must be a supported coin
@@ -154,8 +154,8 @@ def scan_binance_lag(markets: list[dict]) -> list[dict]:
             continue
 
         # Get Polymarket prices
-        yes_price = trader.get_midpoint(token_ids[0])
-        no_price = trader.get_midpoint(token_ids[1])
+        yes_price = trader.get_midpoint(market.yes_token_id)
+        no_price = trader.get_midpoint(market.no_token_id)
         if not yes_price or not no_price:
             continue
 
@@ -181,12 +181,13 @@ def scan_binance_lag(markets: list[dict]) -> list[dict]:
 
             if true_prob >= MIN_TRUE_PROB and edge >= MIN_EDGE:
                 candidates.append({
-                    "market": market,
+                    "market_id": market.market_id,
+                    "end_date": market.end_date,
                     "question": question,
                     "coin": coin_name,
                     "symbol": symbol,
                     "side": "UP",
-                    "token_id": token_ids[0],
+                    "token_id": market.yes_token_id,
                     "outcome": "Yes",
                     "poly_price": yes_price,
                     "true_prob": true_prob,
@@ -226,12 +227,13 @@ def scan_binance_lag(markets: list[dict]) -> list[dict]:
 
             if true_prob >= MIN_TRUE_PROB and edge >= MIN_EDGE:
                 candidates.append({
-                    "market": market,
+                    "market_id": market.market_id,
+                    "end_date": market.end_date,
                     "question": question,
                     "coin": coin_name,
                     "symbol": symbol,
                     "side": "DOWN",
-                    "token_id": token_ids[1],
+                    "token_id": market.no_token_id,
                     "outcome": "No",
                     "poly_price": no_price,
                     "true_prob": true_prob,
