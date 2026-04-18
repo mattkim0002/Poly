@@ -513,7 +513,7 @@ def _check_existing_positions(open_trades: list[dict]):
     """Check open positions for resolution or exit conditions."""
     global _daily_pnl
 
-    live_positions = trader.get_positions()
+    live_positions = execution.get_positions()
     if not live_positions:
         return
 
@@ -575,7 +575,7 @@ def _check_existing_positions(open_trades: list[dict]):
                 print(f"  [THRESHOLD TP] '{question[:40]}' | PnL=${pnl:+.2f}")
                 if not config.DRY_RUN:
                     sell_price = max(0.01, min(0.99, round(current_price - 0.01, 2)))
-                    trader.place_limit_order(token_id, sell_price, real_size, "SELL")
+                    execution.execute_sell(token_id, sell_price, real_size)
 
             elif (is_yes and current_price >= sl_level) or (not is_yes and current_price <= sl_level):
                 pnl = (current_price - avg_price) * real_size
@@ -584,7 +584,7 @@ def _check_existing_positions(open_trades: list[dict]):
                 _daily_pnl += pnl
                 print(f"  [THRESHOLD SL] '{question[:40]}' | PnL=${pnl:.2f}")
                 if not config.DRY_RUN:
-                    trader.place_limit_order(token_id, current_price, real_size, "SELL")
+                    execution.execute_sell(token_id, current_price, real_size)
 
         elif "[ARB" not in question and "[SNIPE]" not in question:
             loss_pct = (avg_price - current_price) / avg_price if avg_price > 0 else 0
@@ -595,7 +595,7 @@ def _check_existing_positions(open_trades: list[dict]):
                 _daily_pnl += pnl
                 print(f"  STOP LOSS: '{question[:40]}' | PnL=${pnl:.2f}")
                 if not config.DRY_RUN:
-                    trader.place_limit_order(token_id, current_price, real_size, "SELL")
+                    execution.execute_sell(token_id, current_price, real_size)
 
 
 def _record_equity(bankroll: float, positions_value: float = 0.0):
@@ -611,7 +611,7 @@ def _record_equity(bankroll: float, positions_value: float = 0.0):
 
 def _print_portfolio(bankroll: float, open_trades: list[dict], recent_trades: list[dict]):
     global _daily_pnl
-    live_positions = trader.get_positions()
+    live_positions = execution.get_positions()
     live_pos_value = sum(float(p.get("currentValue", 0)) for p in (live_positions or []) if float(p.get("size", 0)) > 0)
     num_positions = sum(1 for p in (live_positions or []) if float(p.get("size", 0)) > 0)
     total_equity = bankroll + live_pos_value
@@ -848,7 +848,7 @@ def run_cycle():
 
     print(f"\n[INFO] === CYCLE {_cycle_count} ===")
 
-    bankroll = trader.get_balance()
+    bankroll = execution.get_balance()
     if bankroll <= 0:
         print("[WARN] Zero balance — skipping cycle")
         return
@@ -856,7 +856,7 @@ def run_cycle():
     open_trades = database.get_open_trades()
     recent_trades = database.get_recent_trades(config.WIN_RATE_WINDOW)
 
-    live_positions = trader.get_positions()
+    live_positions = execution.get_positions()
     live_pos_value = sum(float(p.get("currentValue", 0)) for p in (live_positions or []) if float(p.get("size", 0)) > 0)
     num_positions = sum(1 for p in (live_positions or []) if float(p.get("size", 0)) > 0)
     total_equity = bankroll + live_pos_value
@@ -1288,7 +1288,7 @@ def pnl_watcher_thread():
                 current_price = trader.get_midpoint(token_id)
                 if current_price is None:
                     _dead_tokens.add(token_id)
-                    live_positions = trader.get_positions()
+                    live_positions = execution.get_positions()
                     actual_value = 0.0
                     still_held = False
                     for p in (live_positions or []):
@@ -1382,7 +1382,7 @@ def pnl_watcher_thread():
                 if should_sell:
                     print(f"[P&L WATCHER] SELL '{question[:40]}' | ${entry_price:.2f}→${current_price:.2f} | pnl={pnl_pct:+.0%} | {reason}")
 
-                    live_positions = trader.get_positions()
+                    live_positions = execution.get_positions()
                     real_size = trade_size
                     for p in (live_positions or []):
                         if p.get("asset") == token_id and float(p.get("size", 0)) > 0:
@@ -1392,7 +1392,7 @@ def pnl_watcher_thread():
                     if real_size > 0 and not config.DRY_RUN:
                         sell_price = max(0.01, min(0.99, round(current_price - 0.01, 2)))
                         try:
-                            trader.place_limit_order(token_id, sell_price, real_size, "SELL")
+                            execution.execute_sell(token_id, sell_price, real_size)
                             print(f"[P&L WATCHER] Sell order placed @ ${sell_price:.2f} x {real_size:.1f}")
                         except Exception as e:
                             if "400" in str(e) or "balance" in str(e).lower():

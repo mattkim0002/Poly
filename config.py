@@ -36,7 +36,7 @@ DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 
 # === Paper Trading ===
 PAPER_TRADING = os.getenv("PAPER_TRADING", "false").lower() == "true"
-PAPER_STARTING_BALANCE = float(os.getenv("PAPER_STARTING_BALANCE", "100.0"))
+PAPER_STARTING_BALANCE = float(os.getenv("PAPER_STARTING_BALANCE", "1000.0"))
 
 # === Polymarket ===
 CLOB_HOST = "https://clob.polymarket.com"

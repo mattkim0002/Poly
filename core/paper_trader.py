@@ -172,3 +172,59 @@ def paper_get_open_positions() -> list:
     """Return the list of open paper positions."""
     state = load_paper_state()
     return state["open_positions"]
+
+
+def paper_close_position(token_id: str, exit_price: float, size: float | None = None) -> bool:
+    """Close (fully or partially) a paper position at the given price.
+
+    Credits balance, records the closed trade, and removes the position.
+    Returns True if a matching open position was found.
+    """
+    state = load_paper_state()
+    remaining = []
+    closed = False
+    for pos in state["open_positions"]:
+        if pos.get("token_id") != token_id or closed:
+            remaining.append(pos)
+            continue
+
+        pos_size = float(pos.get("size", 0))
+        close_size = float(size) if size is not None else pos_size
+        close_size = min(close_size, pos_size)
+        if close_size <= 0:
+            remaining.append(pos)
+            continue
+
+        entry = float(pos.get("entry_price", 0))
+        proceeds = exit_price * close_size
+        pnl = (exit_price - entry) * close_size
+
+        state["balance"] += proceeds
+        state["peak_balance"] = max(state["peak_balance"], state["balance"])
+        state["total_pnl"] += pnl
+        if pnl > 0:
+            state["wins"] += 1
+        else:
+            state["losses"] += 1
+
+        closed_pos = dict(pos)
+        closed_pos["status"] = "closed"
+        closed_pos["exit_price"] = exit_price
+        closed_pos["pnl"] = pnl
+        closed_pos["exit_time"] = datetime.now(timezone.utc).isoformat()
+        state["trades"].append(closed_pos)
+
+        leftover = pos_size - close_size
+        if leftover > 0:
+            pos = dict(pos)
+            pos["size"] = leftover
+            pos["cost"] = entry * leftover
+            remaining.append(pos)
+
+        closed = True
+        log.info("[PAPER] CLOSED '%s' @ $%.3f x%.1f | PnL: $%+.2f | Balance: $%.2f",
+                 (pos.get("question") or "")[:40], exit_price, close_size, pnl, state["balance"])
+
+    state["open_positions"] = remaining
+    save_paper_state(state)
+    return closed

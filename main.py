@@ -49,29 +49,33 @@ def main():
     except Exception as e:
         print(f"[MOONDEV] smoke-test failed: {e}")
 
-    # Cancel stale orders
-    print("[INFO] Cancelling stale open orders...")
-    try:
-        client = trader.get_client()
-        client.cancel_all()
-        print("[INFO] All open orders cancelled")
-    except Exception as e:
-        print(f"[WARN] Failed to cancel orders: {e}")
+    # Cancel stale orders (live only — paper state has no real CLOB orders)
+    if not config.PAPER_TRADING:
+        print("[INFO] Cancelling stale open orders...")
+        try:
+            client = trader.get_client()
+            client.cancel_all()
+            print("[INFO] All open orders cancelled")
+        except Exception as e:
+            print(f"[WARN] Failed to cancel orders: {e}")
+    else:
+        print("[INFO] Paper mode — skipping live order cancel")
 
-    # Clean ghost trades
-    db_open = database.get_open_trades()
-    live_positions = trader.get_positions()
-    live_tokens = {p.get("asset", "") for p in (live_positions or []) if float(p.get("size", 0)) > 0}
-    cleaned = 0
-    for t in db_open:
-        if t["token_id"] not in live_tokens and t.get("order_id") != "imported":
-            database.update_trade_result(t["id"], t["entry_price"], 0.0, 0.0, "cancelled")
-            cleaned += 1
-    if cleaned:
-        print(f"[INFO] Cleaned {cleaned} ghost trades from DB")
+    # Clean ghost trades (only against live positions; paper DB doesn't diverge)
+    if not config.PAPER_TRADING:
+        db_open = database.get_open_trades()
+        live_positions = execution.get_positions()
+        live_tokens = {p.get("asset", "") for p in (live_positions or []) if float(p.get("size", 0)) > 0}
+        cleaned = 0
+        for t in db_open:
+            if t["token_id"] not in live_tokens and t.get("order_id") != "imported":
+                database.update_trade_result(t["id"], t["entry_price"], 0.0, 0.0, "cancelled")
+                cleaned += 1
+        if cleaned:
+            print(f"[INFO] Cleaned {cleaned} ghost trades from DB")
 
-    # Sync existing positions
-    positions = trader.get_positions()
+    # Sync existing positions (paper mode reads from paper state via execution)
+    positions = execution.get_positions()
     pos_value = 0.0
     for p in (positions or []):
         size = float(p.get("size", 0))
@@ -96,7 +100,7 @@ def main():
             )
             print(f"  [SYNC] {title[:50]} | {size:.1f} shares @ ${avg_price:.3f}")
 
-    bankroll = trader.get_balance()
+    bankroll = execution.get_balance()
     total_equity = bankroll + pos_value
 
     # Hand the session baseline to bot_runtime before the cycle starts.

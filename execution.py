@@ -12,7 +12,7 @@ reduce exposure (not increase it).
 
 import config
 from core import trader, database
-from core.paper_trader import paper_buy
+from core.paper_trader import paper_buy, paper_get_balance, paper_close_position
 from utils.logger import log
 
 
@@ -29,6 +29,52 @@ def log_mode():
     mode = get_mode()
     label = "PAPER (no real money)" if mode == "paper" else "LIVE (real funds)"
     print(f"[EXECUTION] Mode: {label}")
+
+
+def get_balance() -> float:
+    """Return available cash. Routes to paper state or live CLOB per mode."""
+    if get_mode() == "paper":
+        return paper_get_balance()
+    return trader.get_balance()
+
+
+def execute_sell(token_id: str, price: float, size: float) -> bool:
+    """Place an exit SELL order. Routes to paper or live per mode.
+
+    Unlike BUYs, exits are not risk-gated (they reduce exposure).
+    Returns True on successful submission/close.
+    """
+    if size <= 0 or price <= 0:
+        return False
+    mode = get_mode()
+    if mode == "paper":
+        return paper_close_position(token_id, price, size)
+    try:
+        trader.place_limit_order(token_id, price, size, "SELL")
+        return True
+    except Exception as e:
+        log.error("[EXECUTION] SELL failed: %s", e)
+        return False
+
+
+def get_positions() -> list[dict]:
+    """Return open positions. Routes to paper state or live CLOB per mode."""
+    if get_mode() == "paper":
+        from core.paper_trader import paper_get_open_positions
+        paper = paper_get_open_positions() or []
+        # Adapt paper shape -> same keys main.py/bot_runtime.py read from live.
+        return [{
+            "asset": p.get("token_id", ""),
+            "size": p.get("size", 0),
+            "avgPrice": p.get("entry_price", 0),
+            "price": p.get("entry_price", 0),
+            "currentValue": float(p.get("size", 0)) * float(p.get("entry_price", 0)),
+            "title": p.get("question", ""),
+            "market": p.get("question", ""),
+            "conditionId": p.get("market_id", ""),
+            "outcome": p.get("outcome", "Yes"),
+        } for p in paper]
+    return trader.get_positions() or []
 
 
 def execute_buy(

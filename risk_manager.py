@@ -27,8 +27,9 @@ def _fetch_live_state() -> dict:
         "consecutive_losses": 0,
     }
     try:
-        from core import trader, database
-        state["bankroll"] = float(trader.get_balance() or 0.0)
+        import execution
+        from core import database
+        state["bankroll"] = float(execution.get_balance() or 0.0)
 
         open_trades = database.get_open_trades() or []
         for t in open_trades:
