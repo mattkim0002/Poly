@@ -24,6 +24,7 @@ from datetime import date, datetime, timezone
 
 import config
 from core import database, market_data, trader, crypto_predictor, news, macro, moondev
+from core.candidate import Candidate
 from core.market_filter import check_trade as market_filter_check
 from strategies.sizing import calculate_r_multiple, expectancy, drawdown_multiplier, drawdown
 from strategies.arbitrage import scan_all_markets, size_arb
@@ -295,25 +296,22 @@ def _get_active_strategies() -> list[str]:
 # 5. RESOLUTION SNIPER (near-certain at discount)
 # ──────────────────────────────────────────────────────────
 
-def scan_resolution_snipes(markets: list[dict]) -> list[dict]:
-    """Find near-certain outcomes priced below face value."""
+def scan_resolution_snipes(markets: list[Candidate]) -> list[dict]:
+    """Find near-certain outcomes priced below face value.
+
+    Consumes list[Candidate] directly. Enriches each Candidate's
+    yes_ask/yes_bid/no_ask/no_bid fields from the orderbook fetch.
+    """
     snipes = []
 
-    for market in markets:
-        question = market.get("question", "")
-        token_ids = market.get("token_ids", [])
-        outcome_prices = market.get("outcome_prices", [])
-
-        if len(token_ids) < 2 or len(outcome_prices) < 2:
+    for cand in markets:
+        if not cand.yes_token_id or not cand.no_token_id:
             continue
 
-        yes_price = outcome_prices[0]
-        no_price = outcome_prices[1] if len(outcome_prices) > 1 else (1.0 - yes_price)
-
-        for i, (token_id, price, outcome) in enumerate([
-            (token_ids[0], yes_price, "Yes"),
-            (token_ids[1], no_price, "No"),
-        ]):
+        for token_id, price, outcome, is_yes in (
+            (cand.yes_token_id, cand.yes_price, "Yes", True),
+            (cand.no_token_id, cand.no_price, "No", False),
+        ):
             if price < config.ENDGAME_PRICE_MIN or price > config.ENDGAME_PRICE_MAX:
                 continue
 
@@ -321,13 +319,22 @@ def scan_resolution_snipes(markets: list[dict]) -> list[dict]:
             if not book or not book.get("asks"):
                 continue
 
-            real_ask = book["asks"][0]["price"]
-            ask_size = book["asks"][0]["size"]
+            real_ask = float(book["asks"][0]["price"])
+            ask_size = float(book["asks"][0]["size"])
+            best_bid = float(book["bids"][0]["price"]) if book.get("bids") else 0.0
+
+            # Enrich Candidate with live orderbook on the relevant side.
+            if is_yes:
+                cand.yes_ask = real_ask
+                cand.yes_bid = best_bid
+            else:
+                cand.no_ask = real_ask
+                cand.no_bid = best_bid
 
             if real_ask < config.ENDGAME_PRICE_MIN or real_ask > config.ENDGAME_PRICE_MAX:
                 continue
 
-            fee_free = is_fee_free_market(question)
+            fee_free = is_fee_free_market(cand.question)
             if fee_free:
                 fee_per_share = 0.0
             else:
@@ -342,13 +349,13 @@ def scan_resolution_snipes(markets: list[dict]) -> list[dict]:
                 continue
 
             snipes.append({
-                "question": question, "market_id": market.get("id", ""),
+                "question": cand.question, "market_id": cand.market_id,
                 "token_id": token_id, "outcome": outcome,
                 "ask_price": real_ask, "ask_size": ask_size,
                 "profit_per_share": profit_per_share, "profit_pct": net_edge_pct,
                 "fee_per_share": fee_per_share, "slippage_buffer": slip,
                 "fee_free": fee_free,
-                "end_date": market.get("end_date") or market.get("endDate") or "",
+                "end_date": cand.end_date,
             })
 
     snipes.sort(key=lambda x: x["profit_pct"], reverse=True)
