@@ -69,7 +69,7 @@ MIN_RESOLUTION_MINUTES = 1.5       # Matches candle filter (entry_window + mid_c
 # === Hard Filters (applied before any strategy logic) ===
 # Anti-lottery-ticket: skip any market where any outcome is priced below this.
 # Cheap contracts are cheap because the market already knows the answer.
-MIN_PRICE_FLOOR = 0.15
+MIN_PRICE_FLOOR = 0.05
 
 # Anti-coinflip: skip any "Up or Down" market resolving sooner than this.
 # 0 = allow 5-min markets (required for Binance-Lag + Momentum strategies).
