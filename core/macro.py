@@ -33,7 +33,7 @@ Reply with ONLY this JSON, nothing else:
 {"bias": "bullish" | "neutral" | "bearish",
  "confidence": "low" | "medium" | "high",
  "btc_leads_alts": true | false,
- "reasoning": "one short sentence"}
+ "reasoning": "one sentence, 25 words or fewer"}
 
 Rules:
 - "high" confidence only when 4h trends AND headlines AND 1h trends all agree.
@@ -95,16 +95,24 @@ def refresh_macro_bias() -> dict:
 
         response = client.messages.create(
             model=config.CLAUDE_MODEL,
-            max_tokens=200,
+            max_tokens=500,
             system=MACRO_BIAS_SYSTEM,
             messages=[{"role": "user", "content": payload}],
         )
         text = response.content[0].text.strip()
 
+        # Strip any ```json fences and extract the JSON object if Claude wrapped it
+        if text.startswith("```"):
+            text = text.strip("`").lstrip("json").strip()
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            text = text[start:end + 1]
+
         try:
             parsed = json.loads(text)
         except json.JSONDecodeError:
-            log.warning("macro: Claude returned non-JSON: %s", text[:200])
+            log.warning("macro: Claude returned non-JSON: %s", text[:300])
             parsed = {}
 
         now = time.time()

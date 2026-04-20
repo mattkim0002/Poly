@@ -6,8 +6,10 @@ Run on the droplet:
 Auto-refreshes every 5 seconds. Read-only. No DB writes.
 """
 
+import json
 import os
 import sqlite3
+import sys
 from datetime import datetime
 from flask import Flask, Response
 
@@ -15,7 +17,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 DB_PATH = os.path.join(ROOT, "polybot.db")
 LOG_PATH = os.path.join(ROOT, "bot.log")
+PAPER_PATH = os.path.join(ROOT, "paper_trades.json")
 LOG_TAIL_LINES = 80
+
+sys.path.insert(0, ROOT)
 
 app = Flask(__name__)
 
@@ -60,6 +65,60 @@ def load_trades() -> list[dict]:
     return rows
 
 
+def load_paper_state() -> dict | None:
+    """Return paper_trades.json contents or None if missing."""
+    if not os.path.exists(PAPER_PATH):
+        return None
+    try:
+        with open(PAPER_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def load_config_flags() -> dict:
+    """Pull live config flags without importing live trader side effects."""
+    try:
+        import config
+        return {
+            "paper": bool(getattr(config, "PAPER_TRADING", False)),
+            "max_positions": int(getattr(config, "MAX_OPEN_POSITIONS", 0)),
+            "arb": bool(getattr(config, "ENABLE_ARB", False)),
+            "snipe": bool(getattr(config, "ENABLE_SNIPE", False)),
+            "lag": bool(getattr(config, "ENABLE_BINANCE_LAG", False)),
+            "momentum": bool(getattr(config, "ENABLE_MOMENTUM_CLAUDE", False)),
+            "threshold": bool(getattr(config, "ENABLE_THRESHOLD", False)),
+        }
+    except Exception:
+        return {"paper": False, "max_positions": 0, "arb": False, "snipe": False,
+                "lag": False, "momentum": False, "threshold": False}
+
+
+def load_macro_from_log() -> dict | None:
+    """Parse the most recent [MACRO] line from bot.log."""
+    if not os.path.exists(LOG_PATH):
+        return None
+    try:
+        with open(LOG_PATH, "rb") as f:
+            try:
+                f.seek(-65536, os.SEEK_END)
+            except OSError:
+                f.seek(0)
+            data = f.read().decode("utf-8", errors="replace")
+        for line in reversed(data.splitlines()):
+            if "[MACRO]" in line and "bias" in line.lower():
+                start = line.find("{")
+                end = line.rfind("}")
+                if start != -1 and end > start:
+                    try:
+                        return json.loads(line[start:end + 1])
+                    except Exception:
+                        continue
+    except Exception:
+        return None
+    return None
+
+
 def color(val: float) -> str:
     if val > 0:
         return "#00e676"
@@ -84,6 +143,10 @@ def index():
     trades = load_trades()
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     today = datetime.utcnow().strftime("%Y-%m-%d")
+
+    paper_state = load_paper_state()
+    flags = load_config_flags()
+    macro = load_macro_from_log()
 
     open_trades = [t for t in trades if t.get("status") == "open"]
     closed = [t for t in trades if t.get("status") in ("won", "lost")]
@@ -145,6 +208,97 @@ def index():
     if not closed:
         closed_rows = '<tr><td colspan="5" style="color:#666">No closed trades yet</td></tr>'
 
+    # Mode banner
+    mode_label = "PAPER" if flags["paper"] else "LIVE"
+    mode_color = "#ffb74d" if flags["paper"] else "#00e676"
+
+    # Strategies enabled
+    strat_parts = []
+    for name, on in [("ARB", flags["arb"]), ("SNIPE", flags["snipe"]),
+                     ("LAG", flags["lag"]), ("MOMENTUM", flags["momentum"]),
+                     ("THRESHOLD", flags["threshold"])]:
+        c = "#00e676" if on else "#444"
+        strat_parts.append(f'<span style="color:{c}">{name}</span>')
+    strat_html = " · ".join(strat_parts)
+
+    # Paper card (only if paper state exists)
+    paper_card = ""
+    if paper_state:
+        bal = float(paper_state.get("balance", 0.0))
+        peak = float(paper_state.get("peak_balance", 0.0))
+        total_pnl_p = float(paper_state.get("total_pnl", 0.0))
+        tot = int(paper_state.get("total_trades", 0))
+        w = int(paper_state.get("wins", 0))
+        l = int(paper_state.get("losses", 0))
+        open_val = sum(float(p.get("entry_price", 0)) * float(p.get("size", 0))
+                       for p in paper_state.get("open_positions", []))
+        equity = bal + open_val
+        wr = (w / max(tot, 1)) * 100
+        paper_card = f"""
+<div class="card">
+  <h2>PAPER STATE &nbsp; <span style="color:{mode_color};font-size:13px">● {mode_label}</span></h2>
+  <div class="stat-row" style="margin-top:12px">
+    <div class="stat">
+      <span class="stat-label">Cash</span>
+      <span class="stat-value">${bal:.2f}</span>
+    </div>
+    <div class="stat">
+      <span class="stat-label">Equity</span>
+      <span class="stat-value">${equity:.2f}</span>
+    </div>
+    <div class="stat">
+      <span class="stat-label">Peak</span>
+      <span class="stat-value">${peak:.2f}</span>
+    </div>
+    <div class="stat">
+      <span class="stat-label">Session P&L</span>
+      <span class="stat-value" style="color:{color(total_pnl_p)}">{fmt(total_pnl_p)}</span>
+    </div>
+    <div class="stat">
+      <span class="stat-label">Record</span>
+      <span class="stat-value"><span style="color:#00e676">{w}W</span>/<span style="color:#ff5252">{l}L</span> ({wr:.0f}%)</span>
+    </div>
+    <div class="stat">
+      <span class="stat-label">Open / Max</span>
+      <span class="stat-value">{len(paper_state.get('open_positions', []))} / {flags['max_positions']}</span>
+    </div>
+  </div>
+</div>"""
+
+    # Macro card
+    macro_card = ""
+    if macro:
+        bias = macro.get("bias", "neutral")
+        conf = macro.get("confidence", "low")
+        btc_leads = macro.get("btc_leads_alts", False)
+        reasoning = macro.get("reasoning", "")
+        bias_color = {"bullish": "#00e676", "bearish": "#ff5252"}.get(bias, "#ffb74d")
+        macro_card = f"""
+<div class="card">
+  <h2>MACRO BIAS</h2>
+  <div class="stat-row" style="margin-top:12px">
+    <div class="stat">
+      <span class="stat-label">Bias</span>
+      <span class="stat-value" style="color:{bias_color};text-transform:uppercase">{bias}</span>
+    </div>
+    <div class="stat">
+      <span class="stat-label">Confidence</span>
+      <span class="stat-value" style="text-transform:uppercase">{conf}</span>
+    </div>
+    <div class="stat">
+      <span class="stat-label">BTC Leads Alts</span>
+      <span class="stat-value">{'YES' if btc_leads else 'NO'}</span>
+    </div>
+  </div>
+  <div style="color:#aaa;margin-top:8px;font-size:13px">{reasoning}</div>
+</div>"""
+
+    strategies_card = f"""
+<div class="card">
+  <h2>STRATEGIES</h2>
+  <div style="margin-top:10px;font-size:15px;letter-spacing:1px">{strat_html}</div>
+</div>"""
+
     html = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -175,7 +329,7 @@ def index():
 <body>
 
 <div class="card">
-  <h2>POLYBOT DASHBOARD</h2>
+  <h2>POLYBOT DASHBOARD &nbsp; <span style="color:{mode_color};font-size:13px">● {mode_label}</span></h2>
   <div class="stat-row" style="margin-top:12px">
     <div class="stat">
       <span class="stat-label">Today P&L</span>
@@ -199,6 +353,10 @@ def index():
     </div>
   </div>
 </div>
+
+{paper_card}
+{macro_card}
+{strategies_card}
 
 <div class="card">
   <h2>OPEN POSITIONS ({len(open_trades)}) &nbsp; At Risk: ${open_cost:.2f}</h2>
