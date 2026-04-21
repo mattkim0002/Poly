@@ -73,18 +73,17 @@ def extract_asset_key(question: str):
 
 
 def is_duplicate_exposure(question: str, outcome: str, open_trades: list) -> bool:
-    """True if any open trade already holds the same asset + same Yes/No direction.
+    """True if any open trade already holds the same crypto asset (any direction).
 
-    Blocks the 'bot stacks 3 BTC bets in one candle' pattern. Non-crypto markets
-    (asset key = None) are never blocked.
+    Blocks stacking multiple BTC bets AND holding both Yes+No on the same asset
+    (outside of arb, which uses its own gate). Non-crypto markets (asset key = None)
+    are never blocked.
     """
     key = extract_asset_key(question)
     if not key:
         return False
-    out = (outcome or "").lower()
     for t in open_trades:
-        if extract_asset_key(t.get("market_question", "")) == key \
-                and (t.get("outcome") or "").lower() == out:
+        if extract_asset_key(t.get("market_question", "")) == key:
             return True
     return False
 
@@ -1108,6 +1107,11 @@ def run_cycle():
                 if is_duplicate_exposure(snipe["question"], snipe["outcome"], open_trades):
                     print(f"  [SNIPE] BLOCK: duplicate {extract_asset_key(snipe['question'])} {snipe['outcome']}")
                     continue
+                snipe_asset = extract_asset_key(snipe["question"])
+                if snipe_asset and _lag_cooldown_until.get(snipe_asset, 0) > time.time():
+                    remain = int(_lag_cooldown_until[snipe_asset] - time.time())
+                    print(f"  [SNIPE] SKIP {snipe_asset}: cooldown active ({remain}s left)")
+                    continue
                 print(f"  SNIPE: {snipe['question'][:50]} | {snipe['outcome']} @ ${snipe['ask_price']:.3f} | Profit: {snipe['profit_pct']:.1%}")
                 if execute_snipe(snipe, bankroll):
                     trades_placed += 1
@@ -1213,6 +1217,13 @@ def run_cycle():
 
                 if best_trade:
                     mom_asset = extract_asset_key(best_trade["question"])
+                    if mom_asset and _lag_cooldown_until.get(mom_asset, 0) > time.time():
+                        remain = int(_lag_cooldown_until[mom_asset] - time.time())
+                        print(f"  [MOMENTUM] SKIP {mom_asset}: cooldown active ({remain}s left)")
+                        best_trade = None
+
+                if best_trade:
+                    mom_asset = extract_asset_key(best_trade["question"])
                     mom_side = "UP" if best_trade["outcome"] == "Yes" else "DOWN"
                     if mom_asset and mom_asset != "BTC":
                         btc_conf = crypto_predictor.get_btc_confirmation(mom_side)
@@ -1303,11 +1314,11 @@ def pnl_watcher_thread():
                     status = "won" if real_pnl > 0 else "lost"
                     database.update_trade_result(trade["id"], actual_value / max(trade_size, 1), real_pnl, r_mult, status)
                     print(f"[P&L WATCHER] RESOLVED '{question[:40]}' | {status.upper()} | PnL=${real_pnl:+.2f}")
-                    if status == "lost" and "[LAG]" in question:
+                    if status == "lost":
                         cool_key = extract_asset_key(question)
                         if cool_key:
-                            _lag_cooldown_until[cool_key] = time.time() + 180
-                            print(f"[COOLDOWN] {cool_key} locked for 3 min after LAG loss")
+                            _lag_cooldown_until[cool_key] = time.time() + 300
+                            print(f"[COOLDOWN] {cool_key} locked for 5 min after loss")
                     continue
                 if current_price <= 0:
                     continue
@@ -1337,47 +1348,82 @@ def pnl_watcher_thread():
                 should_sell = False
                 reason = ""
 
-                if pnl_pct <= -0.15:
-                    should_sell = True
-                    reason = f"CUT LOSS ({pnl_pct:+.0%})"
+                # Detect short-duration markets (≤10 min total) — let them resolve
+                # naturally. Position sizes are small ($5); binary pays $1 on win.
+                # Stop-losses on 5-min binaries consistently sell -15% dips that
+                # would have resolved to +100%. Only exit on Binance reversal.
+                is_short_binary = False
+                total_duration_min = None
+                if elapsed_min is not None and minutes_left < 999:
+                    total_duration_min = elapsed_min + minutes_left
+                    is_short_binary = total_duration_min <= 10
 
-                elif "[LAG]" in question:
-                    entry_side = (trade.get("outcome") or "").lower()
-                    symbol = None
-                    q_lower = question.lower()
-                    for coin, sym in crypto_predictor.BINANCE_SYMBOLS.items():
-                        if coin in q_lower:
-                            symbol = sym
-                            break
-                    if symbol:
-                        try:
-                            m = crypto_predictor.get_realtime_momentum(symbol)
-                            move_180s = (m or {}).get("price_change_180s")
-                        except Exception:
-                            move_180s = None
-                        if move_180s is not None:
-                            if entry_side == "yes" and move_180s <= -0.15:
-                                should_sell = True
-                                reason = f"BINANCE REVERSAL ({move_180s:+.2f}% vs YES)"
-                            elif entry_side == "no" and move_180s >= 0.15:
-                                should_sell = True
-                                reason = f"BINANCE REVERSAL ({move_180s:+.2f}% vs NO)"
+                if is_short_binary:
+                    # Only rule for short binaries: Binance reversal exit for LAG trades
+                    if "[LAG]" in question:
+                        entry_side = (trade.get("outcome") or "").lower()
+                        symbol = None
+                        q_lower = question.lower()
+                        for coin, sym in crypto_predictor.BINANCE_SYMBOLS.items():
+                            if coin in q_lower:
+                                symbol = sym
+                                break
+                        if symbol:
+                            try:
+                                m = crypto_predictor.get_realtime_momentum(symbol)
+                                move_180s = (m or {}).get("price_change_180s")
+                            except Exception:
+                                move_180s = None
+                            if move_180s is not None:
+                                if entry_side == "yes" and move_180s <= -0.15:
+                                    should_sell = True
+                                    reason = f"BINANCE REVERSAL ({move_180s:+.2f}% vs YES)"
+                                elif entry_side == "no" and move_180s >= 0.15:
+                                    should_sell = True
+                                    reason = f"BINANCE REVERSAL ({move_180s:+.2f}% vs NO)"
+                else:
+                    # Standard exit rules for longer-duration markets
+                    if pnl_pct <= -0.15:
+                        should_sell = True
+                        reason = f"CUT LOSS ({pnl_pct:+.0%})"
 
-                if not should_sell and 0.40 <= entry_price <= 0.60 and current_price <= entry_price - 0.08:
-                    should_sell = True
-                    reason = f"ABS STOP (${entry_price:.2f}→${current_price:.2f})"
+                    elif "[LAG]" in question:
+                        entry_side = (trade.get("outcome") or "").lower()
+                        symbol = None
+                        q_lower = question.lower()
+                        for coin, sym in crypto_predictor.BINANCE_SYMBOLS.items():
+                            if coin in q_lower:
+                                symbol = sym
+                                break
+                        if symbol:
+                            try:
+                                m = crypto_predictor.get_realtime_momentum(symbol)
+                                move_180s = (m or {}).get("price_change_180s")
+                            except Exception:
+                                move_180s = None
+                            if move_180s is not None:
+                                if entry_side == "yes" and move_180s <= -0.15:
+                                    should_sell = True
+                                    reason = f"BINANCE REVERSAL ({move_180s:+.2f}% vs YES)"
+                                elif entry_side == "no" and move_180s >= 0.15:
+                                    should_sell = True
+                                    reason = f"BINANCE REVERSAL ({move_180s:+.2f}% vs NO)"
 
-                if not should_sell and minutes_left < 1.0 and pnl_pct < -0.05:
-                    should_sell = True
-                    reason = f"PRE-RESOLUTION ({pnl_pct:+.0%}, {minutes_left*60:.0f}s left)"
+                    if not should_sell and 0.40 <= entry_price <= 0.60 and current_price <= entry_price - 0.08:
+                        should_sell = True
+                        reason = f"ABS STOP (${entry_price:.2f}→${current_price:.2f})"
 
-                if not should_sell and elapsed_min is not None and elapsed_min >= 3.0 and pnl_pct < -0.05:
-                    should_sell = True
-                    reason = f"TIME EXIT (held {elapsed_min:.1f}min, {pnl_pct:+.0%})"
+                    if not should_sell and minutes_left < 1.0 and pnl_pct < -0.05:
+                        should_sell = True
+                        reason = f"PRE-RESOLUTION ({pnl_pct:+.0%}, {minutes_left*60:.0f}s left)"
 
-                if not should_sell and minutes_left < 1.5 and pnl_pct >= 0.15:
-                    should_sell = True
-                    reason = f"LOCK PROFIT (+{pnl_pct:.0%}, {minutes_left*60:.0f}s left)"
+                    if not should_sell and elapsed_min is not None and elapsed_min >= 3.0 and pnl_pct < -0.05:
+                        should_sell = True
+                        reason = f"TIME EXIT (held {elapsed_min:.1f}min, {pnl_pct:+.0%})"
+
+                    if not should_sell and minutes_left < 1.5 and pnl_pct >= 0.15:
+                        should_sell = True
+                        reason = f"LOCK PROFIT (+{pnl_pct:.0%}, {minutes_left*60:.0f}s left)"
 
                 if should_sell:
                     print(f"[P&L WATCHER] SELL '{question[:40]}' | ${entry_price:.2f}→${current_price:.2f} | pnl={pnl_pct:+.0%} | {reason}")
@@ -1407,11 +1453,11 @@ def pnl_watcher_thread():
                     database.update_trade_result(trade["id"], current_price, pnl, r_mult, status)
                     print(f"[P&L WATCHER] Closed: PnL=${pnl:+.2f} | status={status}")
 
-                    if status == "lost" and "[LAG]" in question:
+                    if status == "lost":
                         cool_key = extract_asset_key(question)
                         if cool_key:
-                            _lag_cooldown_until[cool_key] = time.time() + 180
-                            print(f"[COOLDOWN] {cool_key} locked for 3 min after LAG loss")
+                            _lag_cooldown_until[cool_key] = time.time() + 300
+                            print(f"[COOLDOWN] {cool_key} locked for 5 min after loss")
 
         except Exception as e:
             print(f"[P&L WATCHER] Error: {e}")
