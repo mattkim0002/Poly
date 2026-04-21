@@ -1317,8 +1317,13 @@ def pnl_watcher_thread():
                     if status == "lost":
                         cool_key = extract_asset_key(question)
                         if cool_key:
-                            _lag_cooldown_until[cool_key] = time.time() + 300
-                            print(f"[COOLDOWN] {cool_key} locked for 5 min after loss")
+                            existing = _lag_cooldown_until.get(cool_key, 0)
+                            if existing > time.time():
+                                _lag_cooldown_until[cool_key] = time.time() + 1800
+                                print(f"[COOLDOWN] {cool_key} ESCALATED to 30 min (repeated loss)")
+                            else:
+                                _lag_cooldown_until[cool_key] = time.time() + 600
+                                print(f"[COOLDOWN] {cool_key} locked for 10 min after loss")
                     continue
                 if current_price <= 0:
                     continue
@@ -1382,10 +1387,28 @@ def pnl_watcher_thread():
                                     should_sell = True
                                     reason = f"BINANCE REVERSAL ({move_180s:+.2f}% vs NO)"
                 else:
-                    # Standard exit rules for longer-duration markets
-                    if pnl_pct <= -0.15:
+                    # Scale exit thresholds by time remaining.
+                    # Daily markets swing 20-30% routinely; tight stops just
+                    # realize noise as losses. Only panic-sell on large moves.
+                    if minutes_left > 60:
+                        # >1 hour left: very wide stops, let the position breathe
+                        cut_loss_threshold = -0.35
+                        time_exit_threshold = -0.25
+                        time_exit_hold_min = 30.0
+                    elif minutes_left > 10:
+                        # 10-60 min left: moderate stops
+                        cut_loss_threshold = -0.25
+                        time_exit_threshold = -0.15
+                        time_exit_hold_min = 10.0
+                    else:
+                        # <10 min left: original-ish thresholds
+                        cut_loss_threshold = -0.15
+                        time_exit_threshold = -0.05
+                        time_exit_hold_min = 3.0
+
+                    if pnl_pct <= cut_loss_threshold:
                         should_sell = True
-                        reason = f"CUT LOSS ({pnl_pct:+.0%})"
+                        reason = f"CUT LOSS ({pnl_pct:+.0%}, {minutes_left:.0f}min left)"
 
                     elif "[LAG]" in question:
                         entry_side = (trade.get("outcome") or "").lower()
@@ -1417,7 +1440,7 @@ def pnl_watcher_thread():
                         should_sell = True
                         reason = f"PRE-RESOLUTION ({pnl_pct:+.0%}, {minutes_left*60:.0f}s left)"
 
-                    if not should_sell and elapsed_min is not None and elapsed_min >= 3.0 and pnl_pct < -0.05:
+                    if not should_sell and elapsed_min is not None and elapsed_min >= time_exit_hold_min and pnl_pct < time_exit_threshold:
                         should_sell = True
                         reason = f"TIME EXIT (held {elapsed_min:.1f}min, {pnl_pct:+.0%})"
 
@@ -1456,8 +1479,14 @@ def pnl_watcher_thread():
                     if status == "lost":
                         cool_key = extract_asset_key(question)
                         if cool_key:
-                            _lag_cooldown_until[cool_key] = time.time() + 300
-                            print(f"[COOLDOWN] {cool_key} locked for 5 min after loss")
+                            existing = _lag_cooldown_until.get(cool_key, 0)
+                            if existing > time.time():
+                                # Repeated loss: escalate cooldown to 30 min
+                                _lag_cooldown_until[cool_key] = time.time() + 1800
+                                print(f"[COOLDOWN] {cool_key} ESCALATED to 30 min (repeated loss)")
+                            else:
+                                _lag_cooldown_until[cool_key] = time.time() + 600
+                                print(f"[COOLDOWN] {cool_key} locked for 10 min after loss")
 
         except Exception as e:
             print(f"[P&L WATCHER] Error: {e}")
