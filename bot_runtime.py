@@ -217,6 +217,7 @@ def execute_threshold_trade(opp: dict, bankroll: float) -> bool:
         question=f"[THRESH] {opp['question'][:80]}",
         outcome=opp["outcome"], strategy="threshold",
         edge=edge, market_probability=price,
+        end_date=opp.get("end_date", ""),
     )
     return order_id is not None
 
@@ -500,6 +501,7 @@ def execute_snipe(snipe: dict, bankroll: float) -> bool:
         question=f"[ENDGAME] {snipe['question'][:80]}",
         outcome=snipe["outcome"], strategy="endgame",
         edge=snipe["profit_pct"], market_probability=price,
+        end_date=snipe.get("end_date", ""),
     )
     return order_id is not None
 
@@ -1409,6 +1411,52 @@ def pnl_watcher_thread():
 
                 should_sell = False
                 reason = ""
+
+                # Force-close expired markets immediately
+                if minutes_left < -5:
+                    should_sell = True
+                    exit_price = current_price
+                    reason = f"EXPIRED (ended {abs(minutes_left):.0f}min ago)"
+
+                # Also detect expired markets by parsing the question title
+                # for trades that have no end_date stored
+                if not should_sell and not end_date and elapsed_min is not None:
+                    q_lower = question.lower()
+                    import re
+                    date_match = re.search(r'(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})', q_lower)
+                    if date_match:
+                        try:
+                            month_name = date_match.group(1)
+                            day = int(date_match.group(2))
+                            now_utc = datetime.now(timezone.utc)
+                            month_num = ["january","february","march","april","may","june","july","august","september","october","november","december"].index(month_name) + 1
+                            market_date = datetime(now_utc.year, month_num, day, 23, 59, tzinfo=timezone.utc)
+                            if now_utc > market_date:
+                                should_sell = True
+                                reason = f"EXPIRED (market date {month_name.title()} {day} passed)"
+                        except (ValueError, IndexError):
+                            pass
+
+                if should_sell and reason.startswith("EXPIRED"):
+                    print(f"[P&L WATCHER] CLOSE EXPIRED '{question[:40]}' | ${entry_price:.2f}→${current_price:.2f} | {reason}")
+                    real_size = trade_size
+                    live_positions = execution.get_positions()
+                    for p in (live_positions or []):
+                        if p.get("asset") == token_id and float(p.get("size", 0)) > 0:
+                            real_size = float(p["size"])
+                            break
+                    if real_size > 0 and not config.DRY_RUN:
+                        sell_price = max(0.01, min(0.99, round(current_price - 0.01, 2)))
+                        try:
+                            execution.execute_sell(token_id, sell_price, real_size)
+                        except Exception as e:
+                            print(f"[P&L WATCHER] Expired sell error: {e}")
+                    pnl = (current_price - entry_price) * real_size
+                    r_mult = calculate_r_multiple(entry_price, current_price, entry_price)
+                    status = "won" if pnl > 0 else "lost"
+                    database.update_trade_result(trade["id"], current_price, pnl, r_mult, status)
+                    print(f"[P&L WATCHER] Expired closed: PnL=${pnl:+.2f} | {status}")
+                    continue
 
                 # Detect short-duration markets (≤10 min total) — let them resolve
                 # naturally. Position sizes are small ($5); binary pays $1 on win.
