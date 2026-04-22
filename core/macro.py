@@ -17,13 +17,15 @@ import time
 
 import config
 from core import crypto_predictor, news
+from core import yfinance_data
 from utils.logger import log
 
 
-MACRO_BIAS_SYSTEM = """You analyze the crypto macro environment for a Polymarket 5-minute binary trading bot.
+MACRO_BIAS_SYSTEM = """You analyze the crypto macro environment for a Polymarket binary trading bot.
 
 You receive:
 - BTC/ETH/SOL 1h and 4h trend directions + strengths
+- Traditional market data: SPY, VIX, DXY (US dollar), Gold
 - Recent headlines for Bitcoin, Ethereum, and crypto regulation
 
 Your job: return a SINGLE JSON object describing the overall bias. Be conservative — say "neutral" unless evidence clearly points one way.
@@ -33,11 +35,13 @@ Reply with ONLY this JSON, nothing else:
 {"bias": "bullish" | "neutral" | "bearish",
  "confidence": "low" | "medium" | "high",
  "btc_leads_alts": true | false,
+ "risk_off": true | false,
  "reasoning": "one sentence, 25 words or fewer"}
 
 Rules:
-- "high" confidence only when 4h trends AND headlines AND 1h trends all agree.
-- "btc_leads_alts" = true if BTC direction looks likely to drag ETH/SOL with it in the next few hours.
+- "high" confidence only when 4h trends AND headlines AND traditional markets all agree.
+- "btc_leads_alts" = true if BTC direction looks likely to drag ETH/SOL with it.
+- "risk_off" = true if VIX is elevated (>25), SPY falling, or USD strengthening — crypto usually drops in risk-off.
 - When in doubt, pick "neutral" with "low" confidence.
 """
 
@@ -88,10 +92,28 @@ def refresh_macro_bias() -> dict:
             except Exception:
                 headlines[topic] = []
 
-        # 3. Claude Sonnet synthesis
+        # 3. Traditional market snapshot (yfinance)
+        trad_markets = {}
+        try:
+            trad_markets = yfinance_data.get_market_snapshot()
+        except Exception as e:
+            log.debug("macro: yfinance snapshot failed: %s", e)
+
+        risk_off = {}
+        try:
+            risk_off = yfinance_data.get_risk_off_signal()
+        except Exception:
+            pass
+
+        # 4. Claude Sonnet synthesis
         import anthropic
         client = anthropic.Anthropic()
-        payload = json.dumps({"trends": trends, "headlines": headlines})
+        payload = json.dumps({
+            "crypto_trends": trends,
+            "traditional_markets": trad_markets,
+            "risk_off_signal": risk_off,
+            "headlines": headlines,
+        })
 
         response = client.messages.create(
             model=config.CLAUDE_MODEL,
@@ -120,8 +142,10 @@ def refresh_macro_bias() -> dict:
             "bias": parsed.get("bias", "neutral"),
             "confidence": parsed.get("confidence", "low"),
             "btc_leads_alts": bool(parsed.get("btc_leads_alts", True)),
+            "risk_off": bool(parsed.get("risk_off", False)),
             "reasoning": parsed.get("reasoning", "parse failed"),
             "trends": trends,
+            "trad_markets": trad_markets,
             "updated_at": now,
             "expires_at": now + config.MACRO_REFRESH_SEC,
         }

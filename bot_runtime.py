@@ -1017,6 +1017,16 @@ def run_cycle():
                         print(f"  [MACRO] BLOCK bullish bias vs DOWN trade: {bias.get('reasoning','')[:60]}")
                         continue
 
+                try:
+                    from core import yfinance_data
+                    risk_signal = yfinance_data.get_risk_off_signal()
+                    if risk_signal.get("risk_off") and cand["side"] == "UP":
+                        sigs = ", ".join(risk_signal.get("signals", []))
+                        print(f"  [RISK-OFF] BLOCK UP trade: {sigs}")
+                        continue
+                except Exception:
+                    pass
+
                 flow = trader.get_orderbook_flow(cand["token_id"])
                 print(f"  [FLOW] {cand['coin']} {cand['outcome']} "
                       f"buy_ratio={flow['buy_ratio']:.2f} ({flow['signal']})")
@@ -1241,6 +1251,18 @@ def run_cycle():
                         elif bias.get("bias") == "bullish" and mom_side == "DOWN":
                             print(f"  [MACRO] BLOCK bullish vs DOWN: {bias.get('reasoning','')[:60]}")
                             best_trade = None
+
+                if best_trade:
+                    try:
+                        from core import yfinance_data
+                        risk_signal = yfinance_data.get_risk_off_signal()
+                        mom_side = "UP" if best_trade["outcome"] == "Yes" else "DOWN"
+                        if risk_signal.get("risk_off") and mom_side == "UP":
+                            sigs = ", ".join(risk_signal.get("signals", []))
+                            print(f"  [RISK-OFF] BLOCK UP momentum: {sigs}")
+                            best_trade = None
+                    except Exception:
+                        pass
 
                 if best_trade:
                     flow = trader.get_orderbook_flow(best_trade["token_id"])

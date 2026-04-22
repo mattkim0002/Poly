@@ -138,6 +138,17 @@ def log_raw():
     return Response(tail_log(), mimetype="text/plain")
 
 
+@app.route("/markets")
+def markets_api():
+    """Traditional market snapshot via yfinance — polled by the dashboard."""
+    try:
+        from core import yfinance_data
+        snap = yfinance_data.get_market_snapshot()
+        return Response(json.dumps(snap), mimetype="application/json")
+    except Exception:
+        return Response("{}", mimetype="application/json")
+
+
 @app.route("/")
 def index():
     trades = load_trades()
@@ -266,16 +277,51 @@ def index():
 </div>"""
 
     # Macro card
+    # Traditional markets card (yfinance)
+    trad_card = ""
+    try:
+        from core import yfinance_data
+        snap = yfinance_data.get_market_snapshot()
+        risk = yfinance_data.get_risk_off_signal()
+        if snap:
+            trad_parts = ""
+            for label in ["SPY", "VIX", "DXY", "GOLD", "BTC_YF"]:
+                s = snap.get(label)
+                if s:
+                    c = color(s["change_pct"]) if label != "VIX" else (
+                        "#ff5252" if s["change_pct"] > 5 else "#00e676" if s["change_pct"] < -5 else "#aaa")
+                    trad_parts += f"""
+    <div class="stat">
+      <span class="stat-label">{label}</span>
+      <span class="stat-value">${s['price']:,.0f}</span>
+      <span style="color:{c};font-size:13px">{s['change_pct']:+.1f}%</span>
+    </div>"""
+            risk_label = ""
+            if risk.get("risk_off"):
+                risk_label = '<span style="color:#ff5252;font-size:13px;margin-left:12px">RISK-OFF</span>'
+            elif risk.get("signals"):
+                risk_label = '<span style="color:#ffb74d;font-size:13px;margin-left:12px">CAUTION</span>'
+            trad_card = f"""
+<div class="card">
+  <h2>TRADITIONAL MARKETS {risk_label}</h2>
+  <div class="stat-row" style="margin-top:12px">{trad_parts}
+  </div>
+</div>"""
+    except Exception:
+        pass
+
     macro_card = ""
     if macro:
         bias = macro.get("bias", "neutral")
         conf = macro.get("confidence", "low")
         btc_leads = macro.get("btc_leads_alts", False)
+        risk_off = macro.get("risk_off", False)
         reasoning = macro.get("reasoning", "")
         bias_color = {"bullish": "#00e676", "bearish": "#ff5252"}.get(bias, "#ffb74d")
+        risk_badge = ' <span style="color:#ff5252;font-size:12px">RISK-OFF</span>' if risk_off else ""
         macro_card = f"""
 <div class="card">
-  <h2>MACRO BIAS</h2>
+  <h2>MACRO BIAS{risk_badge}</h2>
   <div class="stat-row" style="margin-top:12px">
     <div class="stat">
       <span class="stat-label">Bias</span>
@@ -355,6 +401,7 @@ def index():
 </div>
 
 {paper_card}
+{trad_card}
 {macro_card}
 {strategies_card}
 
