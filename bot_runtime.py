@@ -1314,6 +1314,28 @@ def pnl_watcher_thread():
                 question = trade.get("market_question", "")
                 trade_size = trade.get("size", 0)
                 cost = trade.get("cost", entry_price * trade_size)
+                end_date_str = trade.get("end_date") or ""
+
+                # Check if this market has expired
+                market_expired = False
+                if end_date_str:
+                    try:
+                        end_dt = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
+                        market_expired = datetime.now(timezone.utc) > end_dt
+                    except (ValueError, TypeError):
+                        pass
+
+                # Force-resolve expired positions (paper or live)
+                if market_expired and token_id in _dead_tokens:
+                    exit_price = 0.0
+                    real_pnl = -cost
+                    if config.PAPER_TRADING:
+                        from core.paper_trader import paper_close_position
+                        paper_close_position(token_id, exit_price, trade_size)
+                    r_mult = calculate_r_multiple(entry_price, exit_price, entry_price)
+                    database.update_trade_result(trade["id"], exit_price, real_pnl, r_mult, "lost")
+                    print(f"[P&L WATCHER] EXPIRED '{question[:40]}' | PnL=${real_pnl:+.2f}")
+                    continue
 
                 if token_id in _dead_tokens:
                     continue
@@ -1321,6 +1343,19 @@ def pnl_watcher_thread():
                 current_price = trader.get_midpoint(token_id)
                 if current_price is None:
                     _dead_tokens.add(token_id)
+
+                    # If market is expired, resolve immediately
+                    if market_expired:
+                        exit_price = 0.0
+                        real_pnl = -cost
+                        if config.PAPER_TRADING:
+                            from core.paper_trader import paper_close_position
+                            paper_close_position(token_id, exit_price, trade_size)
+                        r_mult = calculate_r_multiple(entry_price, exit_price, entry_price)
+                        database.update_trade_result(trade["id"], exit_price, real_pnl, r_mult, "lost")
+                        print(f"[P&L WATCHER] EXPIRED '{question[:40]}' | PnL=${real_pnl:+.2f}")
+                        continue
+
                     live_positions = execution.get_positions()
                     actual_value = 0.0
                     still_held = False

@@ -202,7 +202,7 @@ TIER_A_EDGE = 0.03                 # >= 3% = Tier A (full size)
 # Polymarket min order size = 5 shares, so actual cost is 5 × price.
 KELLY_FRACTION = 0.40              # 40% Kelly — but floor is ~$5 anyway
 MAX_POSITION_PCT = 0.15            # 15% max per trade (~$5 at $35)
-MAX_OPEN_POSITIONS = 5             # Keep buffer cash for sell orders
+MAX_OPEN_POSITIONS = 10            # Keep buffer cash for sell orders
 MIN_ORDER_SIZE_USD = 1.0           # Platform min is 5 shares regardless
 
 # === Risk Manager (hard gates — enforced by risk_manager.py) ===
