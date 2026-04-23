@@ -48,11 +48,11 @@ CYCLE_INTERVAL_SEC = 15            # Fast scanning for momentum
 MAX_MARKETS_PER_CYCLE = 50
 
 # === Strategy Toggles ===
-# Crypto bot mode: ARB + ENDGAME + MOMENTUM + BINANCE-LAG, crypto-only.
+# Only ARB + ENDGAME are profitable. LAG and momentum bleed on fees.
 ENABLE_ARB = True                  # Strategy 1: intra-market arb (Yes+No < $1.00)
 ENABLE_SNIPE = True                # Strategy 2: endgame / near-resolution (with Claude gate)
-ENABLE_MOMENTUM_CLAUDE = True      # Strategy 3: momentum + Claude Sonnet gate (paper validation)
-ENABLE_BINANCE_LAG = True          # Strategy 4: Binance-lag directional (paper validation)
+ENABLE_MOMENTUM_CLAUDE = False     # OFF — 6% win rate, no edge on crypto binaries
+ENABLE_BINANCE_LAG = False         # OFF — loses on spread + fees consistently
 ENABLE_THRESHOLD = False           # OFF — mean-reversion loses on crypto trends
 ENABLE_MOMENTUM_INTRADAY = False   # OFF — experimental hourly/15-min markets
 
