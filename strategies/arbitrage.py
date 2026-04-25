@@ -12,12 +12,14 @@ Thresholds:
 - Near-expiry (<60 min): total_cost < 0.995
 
 Geopolitics/world events = ZERO fees → best arb targets.
+
+Consumes core.candidate.Candidate directly. Orderbook asks/bids populated
+onto the Candidate via the per-token orderbook fetch.
 """
 
-from datetime import datetime, timezone
 from core import trader
-from strategies.ev import get_fee_rate, calculate_taker_fee, is_fee_free_market
-from utils.logger import log
+from core.candidate import Candidate
+from strategies.ev import get_fee_rate, is_fee_free_market
 import config
 
 # Arb spread thresholds
@@ -26,58 +28,53 @@ ARB_THRESHOLD_NEAR_EXPIRY = 0.998
 NEAR_EXPIRY_MINUTES = 60
 
 
-def _evaluate_arb_candidate(market: dict) -> dict | None:
-    """Evaluate a market for arb potential. Returns candidate dict with all stats.
+def _evaluate_arb_candidate(cand: Candidate) -> dict | None:
+    """Evaluate a Candidate for arb potential. Returns opportunity dict with all stats.
 
     Returns None only if orderbook is unavailable. Otherwise returns a dict
     with 'viable' flag indicating whether it passes all checks.
+    Populates cand.yes_ask/bid and cand.no_ask/bid from the orderbook fetch.
     """
-    question = market.get("question", "")
-    token_ids = market.get("token_ids", [])
-
-    if len(token_ids) < 2:
+    if not cand.yes_token_id or not cand.no_token_id:
         return None
 
-    yes_token = token_ids[0]
-    no_token = token_ids[1]
-
-    yes_book = trader.get_orderbook(yes_token)
-    no_book = trader.get_orderbook(no_token)
+    yes_book = trader.get_orderbook(cand.yes_token_id)
+    no_book = trader.get_orderbook(cand.no_token_id)
 
     if not yes_book or not no_book or not yes_book.get("asks") or not no_book.get("asks"):
         return None
 
-    yes_best_ask = yes_book["asks"][0]["price"]
-    no_best_ask = no_book["asks"][0]["price"]
-    yes_ask_size = yes_book["asks"][0]["size"]
-    no_ask_size = no_book["asks"][0]["size"]
+    yes_best_ask = float(yes_book["asks"][0]["price"])
+    no_best_ask = float(no_book["asks"][0]["price"])
+    yes_ask_size = float(yes_book["asks"][0]["size"])
+    no_ask_size = float(no_book["asks"][0]["size"])
+
+    # Enrich Candidate with live orderbook data (best bid/ask on each side).
+    cand.yes_ask = yes_best_ask
+    cand.no_ask = no_best_ask
+    if yes_book.get("bids"):
+        cand.yes_bid = float(yes_book["bids"][0]["price"])
+    if no_book.get("bids"):
+        cand.no_bid = float(no_book["bids"][0]["price"])
 
     total_cost = yes_best_ask + no_best_ask
 
-    # Time to resolution
-    end_date = market.get("end_date") or market.get("endDate") or ""
-    minutes_left = 999
-    if end_date:
-        try:
-            end_dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
-            minutes_left = (end_dt - datetime.now(timezone.utc)).total_seconds() / 60
-        except (ValueError, TypeError):
-            pass
-
+    minutes_left = cand.minutes_to_expiry if cand.minutes_to_expiry is not None else 999.0
     near_expiry = minutes_left < NEAR_EXPIRY_MINUTES
     threshold = ARB_THRESHOLD_NEAR_EXPIRY if near_expiry else ARB_THRESHOLD_NORMAL
 
     # Fee calculation
-    fee_free = is_fee_free_market(question)
+    fee_free = is_fee_free_market(cand.question)
     if fee_free:
         yes_fee = no_fee = fee_rate = 0.0
     else:
-        fee_rate = get_fee_rate(yes_token)
+        fee_rate = get_fee_rate(cand.yes_token_id)
         yes_fee = fee_rate * yes_best_ask * (1.0 - yes_best_ask)
         no_fee = fee_rate * no_best_ask * (1.0 - no_best_ask)
 
-    max_fee = max(yes_fee, no_fee)
-    net_profit = 1.0 - total_cost - max_fee
+    # Arb buys BOTH legs, so we pay BOTH fees (max() was a 50% under-count).
+    fee_pair = yes_fee + no_fee
+    net_profit = 1.0 - total_cost - fee_pair
 
     # Determine if viable
     skip_reason = None
@@ -89,10 +86,10 @@ def _evaluate_arb_candidate(market: dict) -> dict | None:
         skip_reason = f"profit {net_profit/total_cost:.2%} < min {config.MIN_ARB_PROFIT:.2%}"
 
     return {
-        "question": question,
-        "market_id": market.get("id", ""),
-        "yes_token": yes_token,
-        "no_token": no_token,
+        "question": cand.question,
+        "market_id": cand.market_id,
+        "yes_token": cand.yes_token_id,
+        "no_token": cand.no_token_id,
         "yes_price": yes_best_ask,
         "no_price": no_best_ask,
         "total_cost": total_cost,
@@ -102,18 +99,19 @@ def _evaluate_arb_candidate(market: dict) -> dict | None:
         "yes_book_depth": yes_ask_size,
         "no_book_depth": no_ask_size,
         "fee_rate": fee_rate,
-        "fee_per_share": max_fee,
+        "fee_per_share": fee_pair,
         "fee_free": fee_free,
         "threshold": threshold,
         "near_expiry": near_expiry,
         "minutes_left": minutes_left,
+        "end_date": cand.end_date,
         "viable": skip_reason is None,
         "skip_reason": skip_reason,
     }
 
 
-def scan_all_markets(markets: list[dict]) -> list[dict]:
-    """Scan all markets for arbitrage opportunities.
+def scan_all_markets(markets: list[Candidate]) -> list[dict]:
+    """Scan all Candidates for arbitrage opportunities.
 
     Logs ALL candidates (viable or not), returns only viable ones sorted by profit %.
     """
@@ -122,33 +120,33 @@ def scan_all_markets(markets: list[dict]) -> list[dict]:
     best_spread = 999.0
     scanned = 0
 
-    for market in markets:
-        cand = _evaluate_arb_candidate(market)
-        if not cand:
+    for cand in markets:
+        opp = _evaluate_arb_candidate(cand)
+        if not opp:
             continue
 
         scanned += 1
-        if cand["total_cost"] < best_spread:
-            best_spread = cand["total_cost"]
+        if opp["total_cost"] < best_spread:
+            best_spread = opp["total_cost"]
 
         # Only log markets where spread is remotely close (< loosest threshold)
-        if cand["total_cost"] >= ARB_THRESHOLD_NEAR_EXPIRY:
+        if opp["total_cost"] >= ARB_THRESHOLD_NEAR_EXPIRY:
             continue
 
         candidates_found += 1
-        q_short = cand["question"][:40]
-        if cand["viable"]:
-            thresh_label = f"threshold={cand['threshold']}"
-            if cand["near_expiry"]:
+        q_short = opp["question"][:40]
+        if opp["viable"]:
+            thresh_label = f"threshold={opp['threshold']}"
+            if opp["near_expiry"]:
                 thresh_label += " (near expiry)"
-            print(f"  [ARB CANDIDATE] {q_short} | yes={cand['yes_price']:.2f} no={cand['no_price']:.2f} "
-                  f"total={cand['total_cost']:.3f} net_after_fees=${cand['profit_per_share']:+.3f} "
+            print(f"  [ARB CANDIDATE] {q_short} | yes={opp['yes_price']:.2f} no={opp['no_price']:.2f} "
+                  f"total={opp['total_cost']:.3f} net_after_fees=${opp['profit_per_share']:+.3f} "
                   f"→ EXECUTE | {thresh_label}")
-            opportunities.append(cand)
+            opportunities.append(opp)
         else:
-            print(f"  [ARB CANDIDATE] {q_short} | yes={cand['yes_price']:.2f} no={cand['no_price']:.2f} "
-                  f"total={cand['total_cost']:.3f} net_after_fees=${cand['profit_per_share']:+.3f} "
-                  f"→ SKIP ({cand['skip_reason']})")
+            print(f"  [ARB CANDIDATE] {q_short} | yes={opp['yes_price']:.2f} no={opp['no_price']:.2f} "
+                  f"total={opp['total_cost']:.3f} net_after_fees=${opp['profit_per_share']:+.3f} "
+                  f"→ SKIP ({opp['skip_reason']})")
 
     if candidates_found == 0:
         print(f"  [ARB] {scanned} markets scanned | best spread = {best_spread:.3f} | none under threshold {ARB_THRESHOLD_NEAR_EXPIRY}")
@@ -157,10 +155,11 @@ def scan_all_markets(markets: list[dict]) -> list[dict]:
     return opportunities
 
 
-def execute_arb(arb: dict, bankroll: float) -> dict | None:
-    """Execute an arbitrage trade — buy both sides simultaneously.
+def size_arb(arb: dict, bankroll: float) -> dict | None:
+    """Compute arb sizing without placing orders.
 
-    Returns dict with order details or None if failed.
+    Returns a sized plan dict, or None if sizing fails.
+    Caller is responsible for routing through risk_manager → execution.
     """
     max_cost = bankroll * config.ARB_MAX_POSITION_PCT
     cost_per_pair = arb["total_cost"]
@@ -186,35 +185,6 @@ def execute_arb(arb: dict, bankroll: float) -> dict | None:
     print(f"  Profit:  ${expected_profit:.2f} ({arb['profit_pct']:.1%})")
     print(f"  =================")
 
-    # Place YES order
-    yes_order = trader.place_limit_order(
-        token_id=arb["yes_token"],
-        price=arb["yes_price"],
-        size=shares,
-        side="BUY",
-    )
-
-    if not yes_order:
-        print(f"  FAILED: YES order failed")
-        return None
-
-    # Place NO order
-    no_order = trader.place_limit_order(
-        token_id=arb["no_token"],
-        price=arb["no_price"],
-        size=shares,
-        side="BUY",
-    )
-
-    if not no_order:
-        print(f"  WARNING: NO order failed — YES order is naked!")
-        print(f"  Cancelling YES order {yes_order}...")
-        trader.cancel_order(yes_order)
-        return None
-
-    print(f"  YES order: {yes_order}")
-    print(f"  NO order:  {no_order}")
-
     return {
         "question": arb["question"],
         "market_id": arb["market_id"],
@@ -226,6 +196,4 @@ def execute_arb(arb: dict, bankroll: float) -> dict | None:
         "total_cost": total_cost,
         "expected_profit": expected_profit,
         "profit_pct": arb["profit_pct"],
-        "yes_order": yes_order,
-        "no_order": no_order,
     }

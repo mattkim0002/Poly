@@ -2,7 +2,7 @@
 
 import config
 from strategies.kelly import kelly_fraction
-from strategies.risk import drawdown_multiplier, signal_health_multiplier
+from strategies.sizing import drawdown_multiplier, signal_health_multiplier
 from utils.logger import log
 
 

@@ -8,6 +8,7 @@ Only trades BTC, SOL, XRP on 5-minute "Up or Down" markets.
 
 import json
 from core import crypto_predictor, news, trader
+from core.candidate import Candidate
 from utils.logger import log
 
 # Coins this strategy is allowed to trade
@@ -25,7 +26,8 @@ SUPPORTED_COINS = {
 }
 
 # Minimum move over 10-15 min to consider a trade
-MIN_MOVE_PCT = 0.08      # 0.08% move required (very loose — take more trades)
+MIN_MOVE_PCT = 0.05      # 0.05% move required (loosened from 0.08 — more trades in quiet regimes)
+MIN_VOL_RATIO = 0.6      # Volume ratio floor — loosened from 0.8 for low-vol regimes
 # Polymarket must be cheap relative to our estimate
 MAX_POLY_PRICE = 0.78    # Only buy if Poly price < 78c
 MIN_TRUE_PROB = 0.55     # Our estimate must be >= 55%
@@ -70,21 +72,20 @@ headlines or missing coinbase data.
 No text outside the JSON."""
 
 
-def scan_binance_lag(markets: list[dict]) -> list[dict]:
-    """Scan markets for Binance-lag opportunities.
+def scan_binance_lag(markets: list[Candidate]) -> list[dict]:
+    """Scan Candidates for Binance-lag opportunities.
 
-    Returns list of candidate trades with all data for Claude gate.
+    Returns list of lag-opportunity dicts with all data for Claude gate.
     Logs per-coin diagnostics (why skipped) so dry cycles are visible.
     """
     candidates = []
     seen_symbols: set[str] = set()
 
     for market in markets:
-        question = market.get("question", "")
+        question = market.question
         q_lower = question.lower()
-        token_ids = market.get("token_ids", [])
 
-        if "up or down" not in q_lower or len(token_ids) < 2:
+        if "up or down" not in q_lower or not market.yes_token_id or not market.no_token_id:
             continue
 
         # Must be a supported coin
@@ -153,9 +154,14 @@ def scan_binance_lag(markets: list[dict]) -> list[dict]:
             continue
 
         # Get Polymarket prices
-        yes_price = trader.get_midpoint(token_ids[0])
-        no_price = trader.get_midpoint(token_ids[1])
+        yes_price = trader.get_midpoint(market.yes_token_id)
+        no_price = trader.get_midpoint(market.no_token_id)
         if not yes_price or not no_price:
+            continue
+
+        # Price-band filter: if either side is < 0.25 or > 0.75, market is
+        # already decided. Skip — the "lag" is fake, not edge.
+        if not (0.25 <= yes_price <= 0.75 and 0.25 <= no_price <= 0.75):
             continue
 
         # Buy pressure
@@ -167,7 +173,7 @@ def scan_binance_lag(markets: list[dict]) -> list[dict]:
         added = False
 
         # === UP candidate ===
-        if (move_10m >= MIN_MOVE_PCT and uptrend and vol_ratio >= 1.0
+        if (move_10m >= MIN_MOVE_PCT and uptrend and vol_ratio >= MIN_VOL_RATIO
                 and yes_price < MAX_POLY_PRICE):
             # Estimate true prob based on move magnitude + trend
             true_prob = min(0.95, 0.55 + abs(move_10m) * 0.15 + (0.05 if higher_highs and higher_lows else 0))
@@ -175,12 +181,13 @@ def scan_binance_lag(markets: list[dict]) -> list[dict]:
 
             if true_prob >= MIN_TRUE_PROB and edge >= MIN_EDGE:
                 candidates.append({
-                    "market": market,
+                    "market_id": market.market_id,
+                    "end_date": market.end_date,
                     "question": question,
                     "coin": coin_name,
                     "symbol": symbol,
                     "side": "UP",
-                    "token_id": token_ids[0],
+                    "token_id": market.yes_token_id,
                     "outcome": "Yes",
                     "poly_price": yes_price,
                     "true_prob": true_prob,
@@ -200,8 +207,8 @@ def scan_binance_lag(markets: list[dict]) -> list[dict]:
         elif move_10m >= MIN_MOVE_PCT and uptrend:
             if yes_price >= MAX_POLY_PRICE:
                 skip_msg = f"UP yes={yes_price:.2f} too rich (need <{MAX_POLY_PRICE})"
-            elif vol_ratio < 1.0:
-                skip_msg = f"UP vol={vol_ratio:.2f}x too low"
+            elif vol_ratio < MIN_VOL_RATIO:
+                skip_msg = f"UP vol={vol_ratio:.2f}x too low (need >={MIN_VOL_RATIO})"
 
         # === DOWN candidate ===
         # Hard rule: never DOWN on SOL/XRP when uptrend
@@ -213,19 +220,20 @@ def scan_binance_lag(markets: list[dict]) -> list[dict]:
                     print(f"  [BINANCE-LAG] {coin_name} DOWN blocked (SOL/XRP + uptrend)")
             continue
 
-        if (move_10m <= -MIN_MOVE_PCT and downtrend and vol_ratio >= 1.0
+        if (move_10m <= -MIN_MOVE_PCT and downtrend and vol_ratio >= MIN_VOL_RATIO
                 and no_price < MAX_POLY_PRICE):
             true_prob = min(0.95, 0.55 + abs(move_10m) * 0.15 + (0.05 if lower_highs and lower_lows else 0))
             edge = true_prob - no_price
 
             if true_prob >= MIN_TRUE_PROB and edge >= MIN_EDGE:
                 candidates.append({
-                    "market": market,
+                    "market_id": market.market_id,
+                    "end_date": market.end_date,
                     "question": question,
                     "coin": coin_name,
                     "symbol": symbol,
                     "side": "DOWN",
-                    "token_id": token_ids[1],
+                    "token_id": market.no_token_id,
                     "outcome": "No",
                     "poly_price": no_price,
                     "true_prob": true_prob,
@@ -245,8 +253,8 @@ def scan_binance_lag(markets: list[dict]) -> list[dict]:
         elif move_10m <= -MIN_MOVE_PCT and downtrend:
             if no_price >= MAX_POLY_PRICE:
                 skip_msg = f"DOWN no={no_price:.2f} too rich (need <{MAX_POLY_PRICE})"
-            elif vol_ratio < 1.0:
-                skip_msg = f"DOWN vol={vol_ratio:.2f}x too low"
+            elif vol_ratio < MIN_VOL_RATIO:
+                skip_msg = f"DOWN vol={vol_ratio:.2f}x too low (need >={MIN_VOL_RATIO})"
 
         if first_seen and not added and skip_msg:
             print(f"  [BINANCE-LAG] {coin_name} {skip_msg}")

@@ -3,18 +3,24 @@
 import httpx
 
 import config
+from core.candidate import Candidate
 from utils.logger import log
 
 
-def get_active_markets(limit: int = 100) -> list[dict]:
-    """Fetch active, tradeable markets from the Gamma API.
+def get_active_markets(limit: int = 100) -> list[Candidate]:
+    """Fetch active, tradeable markets using the expanded scanner.
 
-    Filters for markets with orderbook enabled, sufficient volume and liquidity.
-    Fetches multiple pages to find enough non-sports markets.
+    Returns list[Candidate]. Each Candidate supports dict-style access
+    (c["key"], c.get("key")) for backward compatibility.
+    Falls back to the legacy fetch if the scanner returns nothing.
     """
-    all_markets = []
+    from core.scanner import scan_universe
+    markets_raw = scan_universe(debug=False)
+    if markets_raw:
+        return markets_raw
 
-    # Fetch multiple batches to get past the sports-dominated top results
+    # Legacy fallback
+    all_markets = []
     for offset in range(0, 500, 100):
         params = {
             "active": "true",
@@ -24,7 +30,6 @@ def get_active_markets(limit: int = 100) -> list[dict]:
             "order": "volume",
             "ascending": "false",
         }
-
         try:
             resp = httpx.get(f"{config.GAMMA_HOST}/markets", params=params, timeout=15)
             resp.raise_for_status()
@@ -98,7 +103,7 @@ def get_active_markets(limit: int = 100) -> list[dict]:
             except (json.JSONDecodeError, TypeError, ValueError):
                 outcome_prices = []
 
-        filtered.append({
+        raw = {
             "id": m.get("id"),
             "question": m.get("question", ""),
             "outcomes": outcomes,
@@ -107,7 +112,10 @@ def get_active_markets(limit: int = 100) -> list[dict]:
             "volume": volume,
             "liquidity": liquidity,
             "end_date": m.get("endDate") or m.get("end_date_iso") or "",
-        })
+        }
+        cand = Candidate.from_api_dict(raw)
+        if cand:
+            filtered.append(cand)
 
     log.info("Fetched %d markets, %d pass filters", len(markets), len(filtered))
     return filtered

@@ -54,7 +54,7 @@ def get_regime(symbol: str = "BTCUSDT") -> str:
     """
     try:
         resp = httpx.get(
-            "https://api.binance.com/api/v3/klines",
+            "https://data-api.binance.vision/api/v3/klines",
             params={"symbol": symbol, "interval": "5m", "limit": 10},
             timeout=10,
         )
@@ -292,7 +292,7 @@ def _fetch_candles(symbol: str, interval: str, limit: int) -> list[dict] | None:
     """Fetch OHLCV candles from Binance."""
     try:
         resp = httpx.get(
-            "https://api.binance.com/api/v3/klines",
+            "https://data-api.binance.vision/api/v3/klines",
             params={"symbol": symbol, "interval": interval, "limit": limit},
             timeout=10,
         )
@@ -395,7 +395,7 @@ def get_orderbook_imbalance(symbol: str) -> dict | None:
     """
     try:
         resp = httpx.get(
-            "https://api.binance.com/api/v3/depth",
+            "https://data-api.binance.vision/api/v3/depth",
             params={"symbol": symbol, "limit": 20},
             timeout=5,
         )
@@ -437,7 +437,7 @@ def get_large_trades(symbol: str) -> dict | None:
     """
     try:
         resp = httpx.get(
-            "https://api.binance.com/api/v3/aggTrades",
+            "https://data-api.binance.vision/api/v3/aggTrades",
             params={"symbol": symbol, "limit": 200},
             timeout=5,
         )
@@ -619,7 +619,7 @@ def get_higher_timeframe_trend(symbol: str) -> dict:
     try:
         # Fetch 4h candles (last 6 = 24 hours)
         resp_4h = httpx.get(
-            "https://api.binance.com/api/v3/klines",
+            "https://data-api.binance.vision/api/v3/klines",
             params={"symbol": symbol, "interval": "4h", "limit": 6},
             timeout=10,
         )
@@ -628,7 +628,7 @@ def get_higher_timeframe_trend(symbol: str) -> dict:
 
         # Fetch 1h candles (last 12 = 12 hours)
         resp_1h = httpx.get(
-            "https://api.binance.com/api/v3/klines",
+            "https://data-api.binance.vision/api/v3/klines",
             params={"symbol": symbol, "interval": "1h", "limit": 12},
             timeout=10,
         )
@@ -984,3 +984,42 @@ def estimate_crypto_probability(question: str, market_price: float, outcome: str
         "kelly_mult": kelly_mult,
         "regime": regime,
     }
+
+
+def get_btc_confirmation(direction: str) -> dict:
+    """BTC-leads-alts confirmation: is BTC's 180s move aligned with the proposed direction?
+
+    Use on NON-BTC trades to avoid buying ETH/SOL UP while BTC is dumping. Returns
+    {"agrees": bool, "btc_move_180s_pct": float, "strength": "strong|weak|none"}.
+
+    On any failure returns a neutral-pass result (agrees=True, strength=none) so
+    BTC-API flakiness never blocks trading.
+    """
+    try:
+        m = get_realtime_momentum("BTCUSDT")
+    except Exception:
+        m = None
+    if not m:
+        return {"agrees": True, "btc_move_180s_pct": 0.0, "strength": "none"}
+
+    move = float(m.get("price_change_180s", 0.0))
+    direction = (direction or "").upper()
+
+    if direction == "UP":
+        agrees = move >= -0.05  # Not actively dumping
+        if move >= 0.10:
+            strength = "strong"
+        elif move >= 0.0:
+            strength = "weak"
+        else:
+            strength = "none"
+    else:  # DOWN
+        agrees = move <= 0.05
+        if move <= -0.10:
+            strength = "strong"
+        elif move <= 0.0:
+            strength = "weak"
+        else:
+            strength = "none"
+
+    return {"agrees": agrees, "btc_move_180s_pct": round(move, 3), "strength": strength}

@@ -1,4 +1,4 @@
-"""Risk management — Chan drawdown protection and Simons rolling win rate."""
+"""Position sizing — Chan drawdown protection and Simons rolling win rate."""
 
 import config
 

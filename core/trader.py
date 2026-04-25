@@ -131,6 +131,41 @@ def get_orderbook(token_id: str) -> dict | None:
         return {"bids": [], "asks": []}
 
 
+def get_orderbook_flow(token_id: str, depth: int = 5) -> dict:
+    """Read orderbook depth and report buy-vs-sell pressure for this token.
+
+    Sums dollar value (price × size) of the top `depth` bid and ask levels.
+    Returns:
+        {"bid_usd": float, "ask_usd": float, "buy_ratio": float,
+         "signal": "buying" | "selling" | "balanced"}
+
+    buy_ratio = bid_usd / (bid_usd + ask_usd). Above 0.62 = buyers dominate
+    (good if you're buying this token — wall of bids supports the price).
+    Below 0.38 = sellers dominate (heavy asks → price likely to drop).
+    Returns "balanced" on missing data so callers don't block trades on noise.
+    """
+    book = get_orderbook(token_id)
+    if not book:
+        return {"bid_usd": 0.0, "ask_usd": 0.0, "buy_ratio": 0.5, "signal": "balanced"}
+
+    bids = book.get("bids", [])[:depth]
+    asks = book.get("asks", [])[:depth]
+    bid_usd = sum(float(lvl["price"]) * float(lvl["size"]) for lvl in bids)
+    ask_usd = sum(float(lvl["price"]) * float(lvl["size"]) for lvl in asks)
+    total = bid_usd + ask_usd
+    if total <= 0:
+        return {"bid_usd": 0.0, "ask_usd": 0.0, "buy_ratio": 0.5, "signal": "balanced"}
+
+    ratio = bid_usd / total
+    if ratio >= 0.62:
+        signal = "buying"
+    elif ratio <= 0.38:
+        signal = "selling"
+    else:
+        signal = "balanced"
+    return {"bid_usd": bid_usd, "ask_usd": ask_usd, "buy_ratio": ratio, "signal": signal}
+
+
 def get_positions() -> list[dict]:
     """Get current open positions via data API."""
     try:
