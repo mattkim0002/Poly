@@ -356,15 +356,14 @@ pre#log{{background:#080808;color:#7ec87e;padding:14px;border-radius:8px;max-hei
 <script>
 function updateClock(){{
   const n=new Date();
-  const days=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
-  const months=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  const d=days[n.getUTCDay()];
-  const m=months[n.getUTCMonth()];
-  const day=n.getUTCDate();
-  const h=String(n.getUTCHours()).padStart(2,'0');
-  const min=String(n.getUTCMinutes()).padStart(2,'0');
-  const s=String(n.getUTCSeconds()).padStart(2,'0');
-  document.getElementById('clock').textContent=d+' '+m+' '+day+', '+h+':'+min+':'+s+' UTC';
+  const fmt=(tz,label)=>{{
+    const o=new Intl.DateTimeFormat('en-US',{{timeZone:tz,weekday:'short',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}}).format(n);
+    return o+' '+label;
+  }};
+  document.getElementById('clock').innerHTML=
+    fmt('UTC','UTC')+'<span style="color:#333;margin:0 6px">|</span>'+
+    fmt('America/New_York','ET')+'<span style="color:#333;margin:0 6px">|</span>'+
+    fmt('America/Los_Angeles','PT');
 }}
 updateClock();setInterval(updateClock,1000);
 async function refreshLog(){{try{{const r=await fetch('/log');const t=await r.text();const el=document.getElementById('log');const b=el.scrollTop+el.clientHeight>=el.scrollHeight-20;el.textContent=t;if(b)el.scrollTop=el.scrollHeight}}catch(e){{}}}}
