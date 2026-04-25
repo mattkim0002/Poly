@@ -239,8 +239,71 @@ def _is_allowed_market_duration(question: str) -> bool:
     return True
 
 
+_MONTHS = ["january","february","march","april","may","june","july",
+           "august","september","october","november","december"]
+
+def _parse_market_expiry(market: Candidate) -> float | None:
+    """Return minutes until expiry (negative = already expired), or None if unknown.
+
+    Checks end_date first, then falls back to parsing dates/times from the title
+    (e.g. "April 22, 12PM ET").
+    """
+    import re
+    now = datetime.now(timezone.utc)
+
+    if market.end_date:
+        try:
+            end_dt = datetime.fromisoformat(str(market.end_date).replace("Z", "+00:00"))
+            return (end_dt - now).total_seconds() / 60
+        except (ValueError, TypeError):
+            pass
+
+    q = market.question
+    q_lower = q.lower()
+
+    # "April 22, 12PM ET" or "April 22, 3PM ET"
+    m = re.search(
+        r'(january|february|march|april|may|june|july|august|september|october|november|december)'
+        r'\s+(\d{1,2})(?:,?\s+(\d{1,2})\s*(am|pm)\s*(?:et|est|edt)?)?',
+        q_lower,
+    )
+    if m:
+        try:
+            month_num = _MONTHS.index(m.group(1)) + 1
+            day = int(m.group(2))
+            hour = int(m.group(3)) if m.group(3) else 23
+            ampm = m.group(4)
+            if ampm == "pm" and hour != 12:
+                hour += 12
+            elif ampm == "am" and hour == 12:
+                hour = 0
+            from zoneinfo import ZoneInfo
+            et = ZoneInfo("America/New_York")
+            market_dt = datetime(now.year, month_num, day, hour, 0, tzinfo=et)
+            return (market_dt - now).total_seconds() / 60
+        except (ValueError, IndexError, KeyError):
+            pass
+
+    # "on April 24?" \u2014 date only, assume EOD
+    m2 = re.search(
+        r'(january|february|march|april|may|june|july|august|september|october|november|december)'
+        r'\s+(\d{1,2})\??',
+        q_lower,
+    )
+    if m2:
+        try:
+            month_num = _MONTHS.index(m2.group(1)) + 1
+            day = int(m2.group(2))
+            market_date = datetime(now.year, month_num, day, 23, 59, tzinfo=timezone.utc)
+            return (market_date - now).total_seconds() / 60
+        except (ValueError, IndexError):
+            pass
+
+    return None
+
+
 def _hard_filter_market(market: Candidate) -> tuple[bool, str]:
-    """Crypto-only + anti-coinflip + anti-lottery-ticket filters. Returns (passes, reason)."""
+    """Crypto-only + anti-coinflip + anti-lottery-ticket + expired-market filters."""
     q_lower = market.question.lower()
 
     if getattr(config, "CRYPTO_ONLY", False):
@@ -248,16 +311,15 @@ def _hard_filter_market(market: Candidate) -> tuple[bool, str]:
         if not re.search(config._CRYPTO_REGEX, q_lower):
             return (False, "not crypto")
 
-    if "up or down" in q_lower:
-        if market.end_date:
-            try:
-                end_dt = datetime.fromisoformat(str(market.end_date).replace("Z", "+00:00"))
-                hours_left = (end_dt - datetime.now(timezone.utc)).total_seconds() / 3600.0
-                if hours_left < config.MIN_RESOLUTION_HOURS:
-                    mins_left = hours_left * 60.0
-                    return (False, f"resolves in {mins_left:.0f} min (under {config.MIN_RESOLUTION_HOURS:.0f}h minimum)")
-            except (ValueError, TypeError):
-                pass
+    minutes_left = _parse_market_expiry(market)
+    if minutes_left is not None and minutes_left < -5:
+        return (False, f"market expired {abs(minutes_left):.0f} min ago")
+
+    if "up or down" in q_lower and minutes_left is not None:
+        hours_left = minutes_left / 60.0
+        if hours_left < config.MIN_RESOLUTION_HOURS:
+            mins_left = hours_left * 60.0
+            return (False, f"resolves in {mins_left:.0f} min (under {config.MIN_RESOLUTION_HOURS:.0f}h minimum)")
 
     for p in (market.yes_price, market.no_price):
         if 0 < p < config.MIN_PRICE_FLOOR:
@@ -826,6 +888,7 @@ def run_cycle():
     markets = [m for m in markets if m.yes_token_id not in open_token_ids and m.no_token_id not in open_token_ids]
     markets = [m for m in markets if _is_allowed_market_duration(m.question)]
 
+    all_markets = list(markets)
     hard_filtered = []
     for m in markets:
         passes, reason = _hard_filter_market(m)
@@ -1042,7 +1105,7 @@ def run_cycle():
     # === RESOLUTION SNIPER ===
     if config.ENABLE_SNIPE and bankroll >= config.MIN_ORDER_SIZE_USD:
         print("[INFO] [SNIPE] Scanning for resolution snipes...")
-        snipes = scan_resolution_snipes(markets)
+        snipes = scan_resolution_snipes(all_markets)
 
         if snipes:
             print(f"  Found {len(snipes)} snipe opportunities!")
