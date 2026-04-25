@@ -284,15 +284,32 @@ def _get_active_strategies() -> list[str]:
 # ──────────────────────────────────────────────────────────
 
 def scan_resolution_snipes(markets: list[Candidate]) -> list[dict]:
-    """Find near-certain outcomes priced below face value.
+    """Find near-certain outcomes on markets that have already expired.
 
-    Consumes list[Candidate] directly. Enriches each Candidate's
-    yes_ask/yes_bid/no_ask/no_bid fields from the orderbook fetch.
+    Hard rules only (no Claude gate):
+    1. End date has passed (market should be resolving)
+    2. Price is $0.96+ (near-certain outcome)
+    3. Positive edge after fees
     """
     snipes = []
+    now = datetime.now(timezone.utc)
 
     for cand in markets:
         if not cand.yes_token_id or not cand.no_token_id:
+            continue
+
+        # Hard rule: market must have an end_date
+        if not cand.end_date:
+            continue
+
+        # Hard rule: end_date must have passed (or within 5 min of passing)
+        try:
+            end_dt = datetime.fromisoformat(str(cand.end_date).replace("Z", "+00:00"))
+            minutes_past = (now - end_dt).total_seconds() / 60
+        except (ValueError, TypeError):
+            continue
+
+        if getattr(config, "ENDGAME_REQUIRE_EXPIRED", True) and minutes_past < -5:
             continue
 
         for token_id, price, outcome, is_yes in (
@@ -310,7 +327,6 @@ def scan_resolution_snipes(markets: list[Candidate]) -> list[dict]:
             ask_size = float(book["asks"][0]["size"])
             best_bid = float(book["bids"][0]["price"]) if book.get("bids") else 0.0
 
-            # Enrich Candidate with live orderbook on the relevant side.
             if is_yes:
                 cand.yes_ask = real_ask
                 cand.yes_bid = best_bid
@@ -319,6 +335,11 @@ def scan_resolution_snipes(markets: list[Candidate]) -> list[dict]:
                 cand.no_bid = best_bid
 
             if real_ask < config.ENDGAME_PRICE_MIN or real_ask > config.ENDGAME_PRICE_MAX:
+                continue
+
+            # Hard rule: spread must be tight (bid close to ask = no one fighting it)
+            spread = real_ask - best_bid if best_bid > 0 else 1.0
+            if spread > 0.05:
                 continue
 
             fee_free = is_fee_free_market(cand.question)
@@ -343,118 +364,30 @@ def scan_resolution_snipes(markets: list[Candidate]) -> list[dict]:
                 "fee_per_share": fee_per_share, "slippage_buffer": slip,
                 "fee_free": fee_free,
                 "end_date": cand.end_date,
+                "minutes_past_expiry": round(minutes_past, 1),
+                "spread": round(spread, 4),
             })
 
     snipes.sort(key=lambda x: x["profit_pct"], reverse=True)
     return snipes
 
 
-ENDGAME_GATE_SYSTEM = """You are the strategy brain for a Polymarket bot.
-Only two strategies are allowed: intra-market ARBITRAGE and ENDGAME / near-resolution.
-This request is ENDGAME — a near-certain outcome priced 0.93-0.99 close to resolution.
-
-Approve ONLY if ALL of:
-1. The resolution criteria is clear, unambiguous, and has a known source.
-2. External data (headlines, official announcements, on-chain facts) makes the outcome
-   overwhelmingly likely — not merely "market seems sure".
-3. Net edge after fees + spread + slippage is between 1% and 3% of capital committed.
-4. No meaningful path risk, no "N/A / 50-50" resolution risk, no disputed outcome.
-5. Not a lottery ticket, not a momentum/directional bet.
-
-Reject if resolution is unclear, delayed, disputed, or evidence is weak.
-
-Reply with ONLY this JSON (no prose):
-{
-  "decision": "approve" | "reject",
-  "strategy": "endgame",
-  "gross_edge_pct": 0.00,
-  "net_edge_pct": 0.00,
-  "fees_deducted_pct": 0.00,
-  "reason": "1-3 sentence explanation",
-  "suggested_changes": {"price_adjustment": "", "size_adjustment": ""}
-}"""
-
-
-def _endgame_claude_gate(snipe: dict) -> dict | None:
-    """Send endgame candidate to Claude Sonnet for structured approval."""
-    try:
-        import json as _json
-        import anthropic
-        client = anthropic.Anthropic()
-
-        try:
-            headlines = news.fetch_headlines(snipe["question"][:80], max_results=4) or []
-        except Exception:
-            headlines = []
-
-        hours_to_resolution = None
-        if snipe.get("end_date"):
-            try:
-                end_dt = datetime.fromisoformat(str(snipe["end_date"]).replace("Z", "+00:00"))
-                hours_to_resolution = round(
-                    (end_dt - datetime.now(timezone.utc)).total_seconds() / 3600.0, 2
-                )
-            except (ValueError, TypeError):
-                pass
-
-        gross = 1.0 - snipe["ask_price"]
-        fees = snipe.get("fee_per_share", 0.0) + snipe.get("slippage_buffer", 0.0)
-        smart_money = moondev.get_profitable_wallet_signal(
-            snipe.get("market_id") or snipe.get("question", "")[:40]
-        )
-
-        payload = _json.dumps({
-            "market_question": snipe["question"][:160],
-            "outcome_buying": snipe["outcome"],
-            "ask_price": round(snipe["ask_price"], 4),
-            "gross_edge_pct": round(gross / snipe["ask_price"], 4),
-            "net_edge_pct": round(snipe["profit_pct"], 4),
-            "fees_deducted_pct": round(fees / snipe["ask_price"], 4),
-            "hours_to_resolution": hours_to_resolution,
-            "recent_headlines": headlines[:4],
-            "smart_money": smart_money,
-        })
-
-        resp = client.messages.create(
-            model=config.CLAUDE_MODEL, max_tokens=250,
-            system=ENDGAME_GATE_SYSTEM,
-            messages=[{"role": "user", "content": payload}],
-        )
-        text = resp.content[0].text.strip()
-        print(f"  [ENDGAME GATE] {text[:140]}")
-
-        try:
-            return _json.loads(text)
-        except _json.JSONDecodeError:
-            print(f"  [ENDGAME GATE] Invalid JSON — rejecting")
-            return None
-    except Exception as e:
-        print(f"  [ENDGAME GATE] Failed ({e}) — rejecting")
-        return None
-
-
 def execute_snipe(snipe: dict, bankroll: float) -> bool:
-    """Execute an endgame trade — Claude gate + risk_manager + execution chokepoint."""
-    gate = _endgame_claude_gate(snipe)
-    if not gate:
-        return False
+    """Execute an endgame trade — hard rules + risk_manager only, no Claude.
 
-    gate_decision = gate.get("decision", "reject")
-    if gate_decision != "approve":
-        print(f"  [ENDGAME] REJECT: {gate.get('reason', 'no reason')[:120]}")
-        return False
-
-    claude_net = float(gate.get("net_edge_pct") or 0.0)
-    if claude_net < config.ENDGAME_MIN_NET_EDGE:
-        print(f"  [ENDGAME] REJECT: Claude net_edge {claude_net:.2%} < {config.ENDGAME_MIN_NET_EDGE:.0%}")
-        return False
+    Entry criteria (already passed by scan_resolution_snipes):
+    - Market end_date has passed
+    - Price >= $0.96
+    - Tight spread (no one contesting the outcome)
+    - Positive edge after fees
+    """
+    price = snipe["ask_price"]
 
     max_spend = min(bankroll * config.ENDGAME_MAX_POSITION_PCT, bankroll - 2.0)
     if max_spend < config.MIN_ORDER_SIZE_USD:
         print(f"  [ENDGAME] REJECT: max_spend ${max_spend:.2f} too small")
         return False
 
-    price = snipe["ask_price"]
     max_shares_by_bank = int(max_spend / price) if price > 0 else 0
     max_shares_by_book = int(snipe["ask_size"])
     shares = min(max_shares_by_bank, max_shares_by_book)
@@ -484,13 +417,13 @@ def execute_snipe(snipe: dict, bankroll: float) -> bool:
         cost = shares * price
         expected_profit = shares * snipe["profit_per_share"]
 
-    print(f"\n  === ENDGAME TRADE (Claude + Risk approved) ===")
+    print(f"\n  === ENDGAME TRADE (Hard rules + Risk approved) ===")
     print(f"  Market:  {snipe['question'][:60]}")
     print(f"  Side:    {snipe['outcome']} @ ${price:.3f}")
     print(f"  Shares:  {shares}")
     print(f"  Cost:    ${cost:.2f}")
     print(f"  Profit:  ${expected_profit:.2f} ({snipe['profit_pct']:.1%})")
-    print(f"  Claude:  net={claude_net:.2%} | {gate.get('reason', '')[:80]}")
+    print(f"  Expired: {snipe['minutes_past_expiry']:.0f} min ago | Spread: ${snipe['spread']:.3f}")
     fee_str = "FREE" if snipe['fee_free'] else f"${snipe['fee_per_share']:.4f}/share"
     print(f"  Fees:    {fee_str}")
     print(f"  ========================================")

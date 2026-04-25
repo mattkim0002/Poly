@@ -118,14 +118,15 @@ ARB_MAX_POSITION_PCT = 0.15        # 15% of bankroll per arb (~$5 at $35 bankrol
 ARB_SLIPPAGE_BUFFER = 0.003        # 0.3c per share slippage cushion
 
 # === Endgame / Resolution Sniper Settings ===
-# Near-resolution contracts priced 0.85-0.99 with Claude validation of the
-# resolution criteria + external data. Same net-edge target as arb.
-ENDGAME_PRICE_MIN = 0.85           # Buy floor (widened from 0.93 for more candidates)
+# TIGHTENED: only trade markets where end_date has passed AND price >= 0.96.
+# No Claude gate — hard rules only. This fires rarely but wins consistently.
+ENDGAME_PRICE_MIN = 0.96           # Only near-certain outcomes
 ENDGAME_PRICE_MAX = 0.99           # Buy ceiling
-ENDGAME_MIN_NET_EDGE = 0.01        # 1% minimum net edge after all costs
+ENDGAME_MIN_NET_EDGE = 0.005       # 0.5% edge (tighter margin is OK at 0.96+)
 ENDGAME_SLIPPAGE_BUFFER = 0.003    # 0.3c per share
 ENDGAME_MAX_POSITION_PCT = 0.15    # 15% of bankroll per endgame trade
-ENDGAME_MIN_PROFIT_USD = 0.02      # Minimum $0.02 absolute profit per trade
+ENDGAME_MIN_PROFIT_USD = 0.01      # Minimum $0.01 absolute profit per trade
+ENDGAME_REQUIRE_EXPIRED = True     # Only snipe markets past their end_date
 
 # === Sports Filter ===
 SPORTS_KEYWORDS = {
