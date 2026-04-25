@@ -309,7 +309,10 @@ pre#log{{background:#080808;color:#7ec87e;padding:14px;border-radius:8px;max-hei
 <div class="card">
   <div class="header">
     <h2>POLYBOT DASHBOARD</h2>
-    <span class="mode" style="background:{mc};color:#000">{mode}</span>
+    <div style="display:flex;align-items:center;gap:14px">
+      <span id="clock" style="color:#888;font-size:13px;font-family:inherit;letter-spacing:0.5px"></span>
+      <span class="mode" style="background:{mc};color:#000">{mode}</span>
+    </div>
   </div>
   <div class="stat-row">
     <div class="stat"><span class="stat-label">Today</span><span class="stat-value" style="color:{c(today_pnl)}">{f(today_pnl)}</span></div>
@@ -351,7 +354,20 @@ pre#log{{background:#080808;color:#7ec87e;padding:14px;border-radius:8px;max-hei
 <div class="footer">Updated: <span id="now">{now}</span> · Auto-refresh 5s</div>
 
 <script>
-async function refreshLog(){{try{{const r=await fetch('/log');const t=await r.text();const el=document.getElementById('log');const b=el.scrollTop+el.clientHeight>=el.scrollHeight-20;el.textContent=t;if(b)el.scrollTop=el.scrollHeight;document.getElementById('now').textContent=new Date().toISOString().replace('T',' ').slice(0,19)+' UTC'}}catch(e){{}}}}
+function updateClock(){{
+  const n=new Date();
+  const days=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  const months=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const d=days[n.getUTCDay()];
+  const m=months[n.getUTCMonth()];
+  const day=n.getUTCDate();
+  const h=String(n.getUTCHours()).padStart(2,'0');
+  const min=String(n.getUTCMinutes()).padStart(2,'0');
+  const s=String(n.getUTCSeconds()).padStart(2,'0');
+  document.getElementById('clock').textContent=d+' '+m+' '+day+', '+h+':'+min+':'+s+' UTC';
+}}
+updateClock();setInterval(updateClock,1000);
+async function refreshLog(){{try{{const r=await fetch('/log');const t=await r.text();const el=document.getElementById('log');const b=el.scrollTop+el.clientHeight>=el.scrollHeight-20;el.textContent=t;if(b)el.scrollTop=el.scrollHeight}}catch(e){{}}}}
 refreshLog();setInterval(refreshLog,2000);setInterval(()=>location.reload(),5000);
 </script>
 </body>
